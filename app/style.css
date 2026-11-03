@@ -205,7 +205,7 @@ a.blk{color:var(--brand);font-weight:700;text-decoration:underline;text-underlin
 .mbl{max-height:46vh;overflow:auto;display:grid;grid-template-columns:1fr 1fr;gap:2px;border:1px solid var(--line);border-radius:12px;padding:6px}
 .mbl label.mb{padding:4px 8px;margin:0;align-items:center}.mbl .ck input{margin-top:0}
 @media(max-width:760px){.mbl{grid-template-columns:1fr}}
-.savest.sy{margin-bottom:6px;cursor:default;line-height:1.5}
+.savest.sy{margin-bottom:6px;cursor:pointer;line-height:1.5}
 .savest.warn{color:#ffd37a}.savest.off{color:#d0eef3;background:#ffffff0d}
 .side .tools{border-top:1px solid #ffffff44}
 .brand{border-bottom:1px solid #ffffff44}

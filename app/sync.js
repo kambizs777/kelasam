@@ -59,7 +59,7 @@ function merge3(B, L, S, pl, st) {
 
 /* ---------- state ---------- */
 const SY_URL = 'https://www.dabiran7.ir/kelasam-sync/';
-const SY = { url: SY_URL, user: '', token: '', auto: true, rev: -1, mod: 0, last: 0, dev: '' };
+const SY = { url: SY_URL, user: '', token: '', auto: true, ask: true, rev: -1, mod: 0, last: 0, dev: '' };
 const SYNC = { busy: false, base: null, st: 'off', msg: '', timer: null, LV: 0, retry: null, lastSnap: 0, again: false };
 const devName = () => (typeof SERVER !== 'undefined' && SERVER ? 'ویندوز' : (typeof CAPP !== 'undefined' && CAPP ? 'اندروید' : 'مرورگر')) + '-' + (SY.dev || '').slice(0, 4);
 
@@ -115,8 +115,9 @@ function syncLabel() {
     case 'offline': return ['warn', 'آفلاین — با اتصال اینترنت همگام می‌شود'];
     case 'err': return ['bad', 'خطای همگام‌سازی: ' + (SYNC.msg || '')];
     case 'auth': return ['bad', 'برای ادامه همگام‌سازی دوباره وارد شوید'];
+    case 'pending': return ['warn', 'تغییرات منتظر تأیید شماست — برای مرور کلیک کنید'];
     case 'ok': return ['ok', 'همگام ✓' + t];
-    default: return [SY.auto ? 'ok' : 'warn', SY.auto ? 'همگام‌سازی فعال' + (t ? ' · آخرین:' + t : '') : 'همگام‌سازی دستی'];
+    default: return [SY.auto ? 'ok' : 'warn', SY.auto ? (SY.ask ? 'همگام‌سازی با تأیید شما' : 'همگام‌سازی خودکار') + (t ? ' · آخرین:' + t : '') : 'همگام‌سازی دستی'];
   }
 }
 function syncStatus() {
@@ -126,13 +127,60 @@ function syncStatus() {
 
 /* ---------- engine ---------- */
 const clone = o => JSON.parse(JSON.stringify(o));
+/* ---------- عکس‌ها همگام نمی‌شوند؛ فقط روی همان دستگاه می‌مانند ---------- */
+function stripPh(r) { if (!r || !Array.isArray(r.classes)) return r; return { ...r, classes: r.classes.map(c => ({ ...c, students: (c.students || []).map(s => { const { photo, ...t } = s; return t; }) })) }; }
+function withPhotos(m, loc) {
+  const ph = new Map(); ((loc && loc.classes) || []).forEach(c => (c.students || []).forEach(s => ph.set(c.id + '|' + s.id, s.photo || '')));
+  return { ...m, classes: (m.classes || []).map(c => ({ ...c, students: (c.students || []).map(s => ({ ...s, photo: ph.get(c.id + '|' + s.id) || '' })) })) };
+}
+/* ---------- خلاصه تغییرها برای تأیید کاربر ---------- */
+function syDiff(a, b) {
+  const d = { cAdd: 0, cDel: 0, sAdd: 0, sDel: 0, chg: 0, other: 0 };
+  const A = new Map(((a && a.classes) || []).map(c => [c.id, c])), Bm = new Map(((b && b.classes) || []).map(c => [c.id, c]));
+  Bm.forEach((c, id) => {
+    const o = A.get(id); if (!o) { d.cAdd++; d.sAdd += (c.students || []).length; return; }
+    const os = new Set((o.students || []).map(s => s.id)), ns = new Set((c.students || []).map(s => s.id));
+    ns.forEach(i => { if (!os.has(i)) d.sAdd++; }); os.forEach(i => { if (!ns.has(i)) d.sDel++; });
+    if (!deq(o, c)) d.chg++;
+  });
+  A.forEach((c, id) => { if (!Bm.has(id)) { d.cDel++; d.sDel += (c.students || []).length; } });
+  if (!(d.cAdd || d.cDel || d.sAdd || d.sDel || d.chg) && !deq(a || {}, b || {})) d.other = 1;
+  return d;
+}
+const syHas = d => !!(d.cAdd || d.cDel || d.sAdd || d.sDel || d.chg || d.other);
+const syTotal = r => ((r && r.classes) || []).reduce((a, c) => a + (c.students || []).length, 0);
+const syDanger = (d, total) => d.cDel > 0 || d.sDel >= Math.max(3, Math.ceil(total * .2));
+function syTxt(d) {
+  const p = [];
+  if (d.cAdd) p.push(`${fa(d.cAdd, 0)} کلاس جدید`); if (d.sAdd) p.push(`${fa(d.sAdd, 0)} دانش‌آموز جدید`);
+  if (d.chg) p.push(`${fa(d.chg, 0)} کلاس با اطلاعات تغییرکرده (نمره، حضور، تکلیف و…)`);
+  if (d.sDel) p.push(`حذف ${fa(d.sDel, 0)} دانش‌آموز`); if (d.cDel) p.push(`حذف ${fa(d.cDel, 0)} کلاس`);
+  if (d.other && !p.length) p.push('تغییر در تنظیمات یا اطلاعات مدرسه');
+  return p.join('، ') || 'بدون تغییر';
+}
+function syConfirm(inc, out, danger) {
+  return new Promise(res => {
+    const d = $('#dlg'); d.dataset.sync = '1';
+    d.innerHTML = `<form onsubmit="return false"><h3>🔄 تأیید همگام‌سازی</h3>
+    ${danger ? '<div class="card" style="padding:10px;border:2px solid var(--bad);color:var(--bad)"><b>⚠️ توجه:</b> این همگام‌سازی شامل حذف اطلاعات است. اگر مطمئن نیستید «فعلاً نه» را بزنید و اول نسخه‌ها را بررسی کنید.</div>' : ''}
+    <div class="card" style="padding:10px"><b>⬇️ از سرور به این دستگاه:</b><br>${esc(syHas(inc) ? syTxt(inc) : 'بدون تغییر')}</div>
+    <div class="card" style="padding:10px"><b>⬆️ از این دستگاه به سرور:</b><br>${esc(syHas(out) ? syTxt(out) : 'بدون تغییر')}</div>
+    <p class="sub" style="margin:0">قبل از اعمال، از اطلاعات فعلی یک پشتیبان خودکار گرفته می‌شود. عکس دانش‌آموزان همگام نمی‌شود.</p>
+    <div class="row"><button type="button" class="btn" data-y="1">✅ بله، همگام کن</button><button type="button" class="btn sec" data-y="">فعلاً نه</button></div></form>`;
+    d.querySelectorAll('[data-y]').forEach(b => b.onclick = () => { delete d.dataset.sync; d.close(); res(!!b.dataset.y); });
+    d.oncancel = () => { delete d.dataset.sync; res(false); };
+    if (!d.open) d.showModal();
+  });
+}
+
 const syncSoon = () => { if (!syncOn() || !SY.auto) return; clearTimeout(SYNC.timer); SYNC.timer = setTimeout(() => syncNow(false), 7000); };
 const userBusy = () => { if (document.querySelector('dialog[open]:not(#dlg[data-sync])')) return true; const a = document.activeElement; return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.id !== 'fq' && !a.closest('dialog')); };
-async function syncNow(manual) {
+async function syncNow(manual, force) {
+  if (!manual && !SY.auto) return false;
   if (!syncOn()) return false;
   if (SYNC.busy) { SYNC.again = true; return false; }
   SYNC.busy = true; SYNC.st = 'syncing'; syncStatus();
-  let result = false;
+  let result = false, confirmed = !!force;
   try {
     for (let attempt = 0; attempt < 5; attempt++) {
       const lv = SYNC.LV;
@@ -141,27 +189,39 @@ async function syncNow(manual) {
       let merged, S = null;
       const st = { del: 0, conf: 0 };
       if (!resp.changed) { // سرور از آخرین همگام تغییری نکرده
-        if (SYNC.base && deq(SYNC.base, R)) { SY.last = Date.now(); SYNC.st = 'ok'; result = true; break; }
-        merged = R;
+        if (SYNC.base && deq(stripPh(SYNC.base), stripPh(R))) { SY.last = Date.now(); SYNC.st = 'ok'; result = true; break; }
+        merged = stripPh(R);
       } else {
-        S = resp.data ? migrate(resp.data) : null;
-        if (!S) merged = R;
-        else merged = merge3(SYNC.base || {}, R, S, SY.mod >= (resp.mod || 0), st);
+        S = resp.data ? stripPh(migrate(resp.data)) : null;
+        if (!S) merged = stripPh(R);
+        else merged = merge3(stripPh(SYNC.base || {}), stripPh(R), S, SY.mod >= (resp.mod || 0), st);
       }
       if (lv !== SYNC.LV) continue; // وسط کار ویرایش شد؛ دوباره
-      if (!deq(merged, R)) {
+      const mergedFull = withPhotos(merged, R);
+      {
+        const Rs = stripPh(R), dInc = syDiff(Rs, merged), ref = S || (SYNC.base ? stripPh(SYNC.base) : null), dOut = syDiff(ref, merged);
+        const danger = syDanger(dInc, syTotal(Rs)) || syDanger(dOut, syTotal(ref || merged));
+        if (!confirmed && (SY.ask || danger) && (syHas(dInc) || syHas(dOut))) {
+          if (!manual) { SYNC.st = 'pending'; SYNC.pend = { inc: dInc, out: dOut, danger }; syncStatus(); return false; }
+          const okc = await syConfirm(dInc, dOut, danger);
+          if (!okc) { SYNC.st = 'pending'; SYNC.pend = { inc: dInc, out: dOut, danger }; syncStatus(); return false; }
+          confirmed = true; SYNC.lastSnap = 0;
+          if (lv !== SYNC.LV) continue;
+        }
+      }
+      if (!deq(mergedFull, R)) {
         if (!manual && userBusy()) { SYNC.st = 'idle'; syncStatus(); clearTimeout(SYNC.retry); SYNC.retry = setTimeout(() => syncNow(false), 12000); return false; }
         if (Date.now() - SYNC.lastSnap > 30 * 60e3) { SYNC.lastSnap = Date.now(); try { await snapNow('قبل از همگام‌سازی'); } catch { } }
-        const cur = db && db.id; R = merged; try { R.classes.forEach(syncAbsent); } catch { } setCur(cur); persist(); render(true);
+        const cur = db && db.id; R = mergedFull; try { R.classes.forEach(syncAbsent); } catch { } setCur(cur); persist(); render(true);
         if (st.conf) toast(`همگام‌سازی انجام شد؛ ${fa(st.conf, 0)} مورد تداخل به نفع جدیدترین ویرایش حل شد`); else toast('اطلاعات از حساب شما به‌روز شد');
       }
       if (S && deq(merged, S)) { // چیزی برای فرستادن نیست
         SY.rev = resp.rev; SYNC.base = clone(merged); await syncPersistBase(); SY.last = Date.now(); SYNC.st = 'ok'; result = true; break;
       }
-      const pr = await syApi('push', { base: resp.rev, mod: Math.max(SY.mod, resp.mod || 0) || Date.now(), data: R });
+      const pr = await syApi('push', { base: resp.rev, mod: Math.max(SY.mod, resp.mod || 0) || Date.now(), data: merged });
       if (pr.conflict) continue; // همزمان کس دیگری فرستاد؛ دوباره ادغام
       if (!pr.ok) throw { server: true, msg: pr.msg || 'خطا' };
-      SY.rev = pr.rev; SYNC.base = clone(R); await syncPersistBase(); SY.last = Date.now(); SYNC.st = 'ok'; result = true; break;
+      SY.rev = pr.rev; SYNC.base = clone(merged); await syncPersistBase(); SY.last = Date.now(); SYNC.st = 'ok'; result = true; break;
     }
     if (!result && SYNC.st === 'syncing') { SYNC.st = 'err'; SYNC.msg = 'تداخل پیاپی؛ کمی بعد دوباره تلاش می‌شود'; }
   } catch (e) {
@@ -190,11 +250,11 @@ async function syncLogin(mode, user, pass, invite) {
   else ch = await linkChoice(S, s);
   if (!ch) { SY.token = ''; SY.user = ''; await syncPersist(true); throw { msg: 'اتصال لغو شد؛ اطلاعات هیچ‌کدام تغییری نکرد' }; }
   if (ch === 'upload') { SY.rev = s.rev; SYNC.base = emptyRoot(); }
-  else if (ch === 'local') { SY.rev = s.rev; SYNC.base = clone(S); }
-  else if (ch === 'server') { SY.rev = -1; SYNC.base = clone(R); }
+  else if (ch === 'local') { SY.rev = s.rev; SYNC.base = stripPh(clone(S)); }
+  else if (ch === 'server') { SY.rev = -1; SYNC.base = stripPh(R); }
   else { SY.rev = -1; SYNC.base = {}; }
   await syncPersistBase(); await syncPersist(true);
-  return syncNow(true);
+  return syncNow(true, true);
 }
 function linkChoice(S, meta) {
   return new Promise(res => {
@@ -251,7 +311,8 @@ function syncDialog(tab) {
   d.innerHTML = `<form onsubmit="return false"><h3>🔄 همگام‌سازی</h3>
   <div class="card" style="padding:12px"><div class="row" style="justify-content:space-between"><span>حساب: <b dir="ltr">${esc(SY.user)}</b></span><span class="pill ${c === 'ok' ? 'ok' : c === 'bad' ? 'bad' : 'warn'}">${esc(t)}</span></div>
   <div class="sub" style="margin-top:4px">این دستگاه: ${esc(devName())} · ${SY.last ? 'آخرین همگام‌سازی: ' + when(SY.last) : 'هنوز همگام نشده'}</div></div>
-  <label class="ck"><input type="checkbox" id="syAuto" ${SY.auto ? 'checked' : ''}><span><b>همگام‌سازی خودکار</b><small>چند ثانیه بعد از هر تغییر و هر بار که اینترنت وصل شد. اگر خاموش باشد فقط با دکمه زیر همگام می‌شود.</small></span></label>
+  <label class="f">روش همگام‌سازی<select id="syMode"><option value="auto" ${SY.auto && !SY.ask ? 'selected' : ''}>خودکار (بدون پرسش)</option><option value="ask" ${SY.auto && SY.ask ? 'selected' : ''}>با تأیید من (پیشنهادی): قبل از هر تغییر خلاصه نشان بده</option><option value="manual" ${!SY.auto ? 'selected' : ''}>فقط دستی: خودم دکمه را بزنم</option></select></label>
+  <p class="sub" style="margin:0">عکس دانش‌آموزان همگام نمی‌شود و فقط روی همان دستگاه می‌ماند. در هر حالت، اگر همگام‌سازی شامل حذف تعداد زیادی اطلاعات باشد، حتماً از شما تأیید می‌گیرد.</p>
   <div class="row"><button type="button" class="btn" id="syNow">همگام‌سازی همین الان</button><button type="button" class="btn sec" id="syHist">نسخه‌های ذخیره‌شده در سرور</button></div>
   <details><summary class="sub" style="cursor:pointer">گزینه‌های پیشرفته</summary><div class="row" style="margin-top:8px">
   <button type="button" class="btn sec sm" id="syDown">جایگزینی اطلاعات این دستگاه با سرور</button><button type="button" class="btn sec sm" id="syUp">جایگزینی اطلاعات سرور با این دستگاه</button><button type="button" class="btn sec sm" id="syPw">تغییر رمز</button></div>
@@ -261,17 +322,17 @@ function syncDialog(tab) {
   <p class="sub" style="margin:0">خروج از حساب هیچ اطلاعاتی را از این دستگاه پاک نمی‌کند.</p></form>`;
   d.querySelector('[data-x]').onclick = close;
   const msg = x => { const m = $('#syMsg'); if (m) m.textContent = x; };
-  $('#syAuto').onchange = e => { SY.auto = e.target.checked; syncPersist(true); syncStatus(); if (SY.auto) syncSoon(); };
+  $('#syMode').onchange = e => { const v = e.target.value; SY.auto = v !== 'manual'; SY.ask = v !== 'auto'; syncPersist(true); syncStatus(); if (SY.auto) syncSoon(); };
   $('#syUrl').onchange = e => { SY.url = e.target.value.trim() || SY_URL; syncPersist(true); };
   $('#syNow').onclick = async () => { $('#syNow').disabled = true; msg('در حال همگام‌سازی…'); const ok = await syncNow(true); if (ok) toast('همگام‌سازی کامل شد'); };
   $('#syOut').onclick = async () => { if (confirm('از حساب خارج شوید؟ اطلاعات این دستگاه سر جایش می‌ماند و برنامه آفلاین ادامه می‌دهد.')) { await syncLogout(); syncDialog(); } };
   $('#syDown').onclick = async () => {
     if (!confirm('اطلاعات این دستگاه با نسخه سرور جایگزین شود؟ (از وضعیت فعلی یک پشتیبان گرفته می‌شود)')) return;
-    try { const s = await syApi('pull', { rev: -1, force: true }); if (!s.data) return msg('روی سرور اطلاعاتی نیست.'); await snapNow('قبل از جایگزینی با سرور'); SYNC.lastSnap = Date.now(); const cur = db && db.id; R = migrate(s.data); setCur(cur); SY.rev = s.rev; SYNC.base = clone(R); await syncPersistBase(); persist(); SY.last = Date.now(); SYNC.st = 'ok'; syncStatus(); render(true); syncDialog(); toast('اطلاعات از سرور جایگزین شد'); } catch (e) { msg(e.msg || 'خطا'); }
+    try { const s = await syApi('pull', { rev: -1, force: true }); if (!s.data) return msg('روی سرور اطلاعاتی نیست.'); await snapNow('قبل از جایگزینی با سرور'); SYNC.lastSnap = Date.now(); const cur = db && db.id; R = withPhotos(stripPh(migrate(s.data)), R); setCur(cur); SY.rev = s.rev; SYNC.base = stripPh(R); await syncPersistBase(); persist(); SY.last = Date.now(); SYNC.st = 'ok'; syncStatus(); render(true); syncDialog(); toast('اطلاعات از سرور جایگزین شد'); } catch (e) { msg(e.msg || 'خطا'); }
   };
   $('#syUp').onclick = async () => {
     if (!confirm('اطلاعات سرور با اطلاعات این دستگاه جایگزین شود؟ (نسخه قبلی سرور در «نسخه‌های ذخیره‌شده در سرور» می‌ماند)')) return;
-    try { const s = await syApi('pull', { rev: -1 }); const p = await syApi('push', { base: s.rev, force: true, mod: Date.now(), data: R }); if (!p.ok) return msg(p.msg || 'خطا'); SY.rev = p.rev; SYNC.base = clone(R); await syncPersistBase(); SY.last = Date.now(); SYNC.st = 'ok'; syncStatus(); syncDialog(); toast('اطلاعات سرور با این دستگاه یکی شد'); } catch (e) { msg(e.msg || 'خطا'); }
+    try { const s = await syApi('pull', { rev: -1 }); const p = await syApi('push', { base: s.rev, force: true, mod: Date.now(), data: stripPh(R) }); if (!p.ok) return msg(p.msg || 'خطا'); SY.rev = p.rev; SYNC.base = stripPh(R); await syncPersistBase(); SY.last = Date.now(); SYNC.st = 'ok'; syncStatus(); syncDialog(); toast('اطلاعات سرور با این دستگاه یکی شد'); } catch (e) { msg(e.msg || 'خطا'); }
   };
   $('#syPw').onclick = async () => {
     const o = prompt('رمز فعلی:'); if (!o) return; const n = prompt('رمز جدید (حداقل ۶ نویسه):'); if (!n) return;
@@ -286,7 +347,7 @@ function syncDialog(tab) {
       d.querySelector('[data-back]').onclick = () => syncDialog();
       d.querySelectorAll('[data-rv]').forEach(b => b.onclick = async () => {
         if (!confirm('اطلاعات این دستگاه با این نسخه جایگزین شود؟')) return;
-        try { const g = await syApi('getver', { rev: +b.dataset.rv }); if (!g.ok) return toast(g.msg); await snapNow('قبل از بازگردانی از سرور'); const cur = db && db.id; R = migrate(g.data); setCur(cur); save(); render(true); toast('نسخه بازگردانی شد'); close(); } catch (e) { toast(e.msg || 'خطا'); }
+        try { const g = await syApi('getver', { rev: +b.dataset.rv }); if (!g.ok) return toast(g.msg); await snapNow('قبل از بازگردانی از سرور'); const cur = db && db.id; R = withPhotos(stripPh(migrate(g.data)), R); setCur(cur); save(); render(true); toast('نسخه بازگردانی شد'); close(); } catch (e) { toast(e.msg || 'خطا'); }
       });
     } catch (e) { msg(e.msg || 'خطا'); }
   };
@@ -301,3 +362,5 @@ function syncBoot() {
   addEventListener('focus', () => { if (syncOn() && SY.auto && Date.now() - SY.last > 30000) syncNow(false); });
   setInterval(() => { if (syncOn() && SY.auto && !document.hidden && Date.now() - SY.last > 120000) syncNow(false); }, 60000);
 }
+
+document.addEventListener('click', e => { const t = e.target.closest && e.target.closest('#syncSt'); if (!t) return; if (SYNC.st === 'pending' && syncOn()) syncNow(true); else syncDialog(); });
