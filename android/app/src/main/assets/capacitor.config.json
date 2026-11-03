@@ -1,0 +1,9 @@
+{
+	"appId": "ir.kelasam.app",
+	"appName": "kelasam",
+	"webDir": "www",
+	"android": {
+		"allowMixedContent": false
+	},
+	"backgroundColor": "#f3f7f8"
+}
