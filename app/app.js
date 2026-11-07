@@ -66,12 +66,24 @@ const behPill = t => `<span class="pill" style="${chipStyle(t)}">${BEH[t].t} (${
 const KEY = 'class-office-v1';
 const emptyRoot = () => ({ v: 2, meta: { school: '', teacher: '', year: '', pass: 10 }, classes: [] });
 const newClass = (name, grade = '') => ({ id: uid(), name, grade, students: [], courses: [], exams: [], att: {}, beh: [], tasks: [], acts: [], draws: [], bstep: 1 });
+/* سرور PHP قدیمی هر «{}» خالی را به «[]» تبدیل می‌کرد؛ آن‌وقت نمره‌ی تازه روی آرایه می‌نشست و هنگام ذخیره (JSON) از بین می‌رفت. اینجا شکل درست برمی‌گردد. */
+function fixShapes(d) {
+  if (!d || !Array.isArray(d.classes)) return d;
+  const O = (o, k) => { const v = o[k]; if (!v || typeof v !== 'object') o[k] = {}; else if (Array.isArray(v)) o[k] = Object.assign({}, v); return o[k]; };
+  d.classes.forEach(c => {
+    O(c, 'att'); Object.keys(c.att).forEach(k => O(c.att, k));
+    (c.exams || []).forEach(e => O(e, 'scores'));
+    (c.tasks || []).forEach(t => { O(t, 'res'); Object.keys(t.res).forEach(k => O(t.res, k)); });
+    (c.acts || []).forEach(a => { O(a, 'res'); Object.keys(a.res).forEach(k => O(a.res, k)); });
+  });
+  return d;
+}
 function migrate(d) {
   if (!d || typeof d !== 'object') return null;
   if (Array.isArray(d.classes)) {
     d.meta = Object.assign({ school: '', teacher: '', year: '', pass: 10 }, d.meta);
-    d.classes.forEach(c => { c.students ??= []; c.courses ??= []; c.exams ??= []; c.att ??= {}; c.beh ??= []; c.tasks ??= []; c.acts ??= []; c.draws ??= []; c.bstep ??= 1; c.grade ??= ''; });
-    return d;
+    d.classes.forEach(c => { c.students ??= []; c.courses ??= []; c.exams ??= []; c.att ??= {}; c.beh ??= []; c.tasks ??= []; c.acts ??= []; c.draws ??= []; c.drawn ??= []; c.bstep ??= 1; c.grade ??= ''; });
+    return fixShapes(d);
   }
   if (Array.isArray(d.students)) { // old single-class backup
     const m = d.meta || {};
@@ -116,7 +128,7 @@ const idbPut = v => idb().then(d => { d.transaction('kv', 'readwrite').objectSto
 const CAPP = !!(window.Capacitor && Capacitor.isNativePlatform && Capacitor.isNativePlatform());
 const FS = CAPP ? Capacitor.Plugins.Filesystem : null, NFILE = 'kelasam/class-data.json';
 let fileChain = Promise.resolve();
-const pushFile = (text) => { if (!FS) return; fileChain = fileChain.then(() => FS.writeFile({ path: NFILE, data: text, directory: 'DATA', encoding: 'utf8', recursive: true })).catch(() => toast('ذخیره در حافظه گوشی انجام نشد!')); };
+const pushFile = (text) => { if (!FS) return Promise.resolve(); fileChain = fileChain.then(() => FS.writeFile({ path: NFILE, data: text, directory: 'DATA', encoding: 'utf8', recursive: true })).catch(() => toast('ذخیره در حافظه گوشی انجام نشد!')); return fileChain; };
 const readFile = () => FS.readFile({ path: NFILE, directory: 'DATA', encoding: 'utf8' }).then(r => r.data).catch(() => null);
 let SERVER = false, fresh = false, VER = '0', pushing = null, again = false, saveInfo = { ok: true, t: 0 };
 const flushServer = () => pushing || Promise.resolve();
@@ -130,10 +142,12 @@ function showSave() {
 const pullServer = async (force) => {
   try {
     if (pushing || again) return; // never replace local edits that are not saved yet
+    const lv = SYNC.LV;
     const r = await fetch('api/data', { cache: 'no-store' }); if (!r.ok) return;
     const v = r.headers.get('X-Ver') || '0'; if (!force && v === VER) return;
-    if (pushing || again) return;
-    const j = migrate(await r.json()); VER = v;
+    const j0 = await r.json();
+    if (pushing || again || lv !== SYNC.LV) return; // وسط خواندن ویرایش شد: چیزی را جایگزین نکن
+    const j = migrate(j0); VER = v;
     if (j) { const cur = db && db.id; R = j; setCur(cur); render(true); toast('اطلاعات از فایل برنامه به‌روز شد'); }
   } catch { }
 };
@@ -164,8 +178,31 @@ try { R = migrate(JSON.parse(localStorage.getItem(KEY))); } catch { }
 if (!R) { R = emptyRoot(); fresh = true; }
 let db = null; // current class
 const setCur = id => { db = R.classes.find(c => c.id === id) || null; };
-const persist = () => { const s = JSON.stringify(R); if (!SERVER) { try { localStorage.setItem(KEY, s); } catch { } if (!CAPP) idbPut(s); } pushFile(s); if (SERVER) pushServer(); };
-const save = () => { try { R.classes.forEach(syncAbsent); } catch { } SYNC.LV++; SY.mod = Date.now(); syncPersist(); persist(); syncSoon(); };
+const persist = () => { const s = JSON.stringify(R); if (!SERVER) { try { localStorage.setItem(KEY, s); } catch { } if (!CAPP) idbPut(s); } const f = pushFile(s); return SERVER ? pushServer() : f; };
+const save = () => { try { R.classes.forEach(syncAbsent); } catch { } SYNC.LV++; SY.mod = nowS(); syncPersist(); persist(); syncSoon(); };
+/* «ذخیره اجباری»: هر کادر نیمه‌تمام ثبت می‌شود، همه‌چیز روی حافظه نوشته و با خواندن دوباره تأیید می‌شود و یک پشتیبان هم ساخته می‌شود */
+async function forceSave(quiet) {
+  try { const a = document.activeElement; if (a && a.blur && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) a.blur(); } catch { }
+  await new Promise(r => setTimeout(r, 40));
+  try { R.classes.forEach(syncAbsent); } catch { }
+  SYNC.LV++; SY.mod = nowS(); syncPersist(true);
+  const text = JSON.stringify(R), nC = R.classes.length, nS = R.classes.reduce((a, c) => a + c.students.length, 0);
+  let ok = false, where = '', err = '';
+  try {
+    if (SERVER) {
+      await persist(); await flushServer();
+      const r = await fetch('api/data', { cache: 'no-store' }), back = await r.text();
+      ok = r.ok && (back === text || deq(JSON.parse(back), JSON.parse(text)));
+      where = ((SINFO && SINFO.dir) || 'C:\\kelasamdb') + '\\class-data.json';
+    } else if (CAPP) {
+      await persist(); await fileChain; ok = (await readFile()) === text; where = 'حافظه داخلی برنامه روی گوشی';
+    } else { await persist(); ok = localStorage.getItem(KEY) === text; where = 'حافظه مرورگر'; }
+  } catch (e) { err = String((e && e.message) || e); }
+  let snap = false; try { snap = !!(await Promise.race([snapNow('ذخیره اجباری'), new Promise(r => setTimeout(r, 8000))])); } catch { }
+  if (ok) { saveInfo = { ok: true, t: Date.now() }; showSave && showSave(); }
+  if (!quiet || !ok) alert(ok ? `✓ ذخیره اجباری انجام و با خواندن دوباره تأیید شد.\n\nمحل ذخیره: ${where}\nحجم: ${fa(Math.round(text.length / 1024), 0)} کیلوبایت · ${fa(nC, 0)} کلاس · ${fa(nS, 0)} دانش‌آموز${snap ? '\nیک نسخه پشتیبان هم ساخته شد.' : ''}` : '⚠️ ذخیره روی حافظه تأیید نشد' + (err ? ' (' + err + ')' : '') + '.\nبرنامه را نبندید؛ از منوی «ذخیره» یک فایل پشتیبان بگیرید و به پشتیبانی خبر دهید.');
+  return { ok };
+}
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
 
 /* ================= calculations (class-parametrised) ================= */
@@ -195,6 +232,9 @@ const pass = () => R.meta.pass ?? 10;
 const gradeCls = v => v == null ? '' : v >= 17 ? 'ok' : v >= pass() ? 'warn' : 'bad';
 const pill = v => v == null ? '—' : `<span class="pill ${gradeCls(v)}">${fa(v)}</span>`;
 const avatar = (s, cls = '') => s.photo ? `<img class="av ${cls}" src="${s.photo}" alt="${esc(s.name)}">` : `<span class="av ${cls}" style="background:${colorOf(s.id)}">${esc(s.name.trim()[0] || '؟')}</span>`;
+const nl = s => `<a href="#" class="nl" data-act="open" data-id="${s.id}" title="باز کردن پروفایل ${esc(s.name)}">${esc(s.name)}</a>`;
+const qaBtns = s => `<div class="qa">${[['tasks', 'تکلیف', 'qtk'], ['beh', 'رفتار', 'qbh'], ['exams', 'آزمون', 'qex'], ['acts', 'فعالیت', 'qac']].map(([v, t, c]) => `<button type="button" class="qb ${c}" data-act="goto" data-v="${v}" data-id="${s.id}" title="${t} ${esc(s.name)}">${t}</button>`).join('')}<button type="button" class="qb qsm" data-act="summary" data-id="${s.id}" title="برآیند کلی ${esc(s.name)} (قابل نمایش روی صفحه دوم)">برآیند</button></div>`;
+const coursePick = (act, cur, label = 'درس') => `<div class="card noprint" style="margin-bottom:12px;padding:12px 16px"><div class="row" style="margin:0"><b style="font-size:13px">${label}:</b><div class="chips"><button type="button" class="cc ${!cur ? 'on' : ''}" data-act="${act}" data-id="">همه دروس</button>${db.courses.map(k => `<button type="button" class="cc ${cur === k.id ? 'on' : ''}" data-act="${act}" data-id="${k.id}">${esc(k.name)}</button>`).join('')}</div></div></div>`;
 const behBadge = c => `<span class="pill ok">${sgn(c.pos).replace('−', '+')}</span> <span class="pill bad">${c.neg ? '−' + fa(c.neg, 0) : '۰'}</span>`;
 
 /* ================= state & ui ================= */
@@ -223,16 +263,22 @@ const head = (t, sub, actions = '') => `<div class="top"><div><h1>${t}</h1><div 
 function classBar() {
   return `<div class="clsbar noprint"><span>🏫 کلاس فعال:</span><select id="clsSel">${R.classes.map(c => `<option value="${c.id}" ${c.id === db.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select><span>${fa(db.students.length, 0)} دانش‌آموز</span></div>`;
 }
+const resetClassFilters = () => { S.st = S.ex = S.tk = S.ak = null; S.fq = ''; S.fid = ''; S.exCourse = S.tkCourse = S.actCourse = S.bc = S.pbc = ''; S.dr.c = ''; S.pbt = ''; S.lastDraw = null; };
 function V(h) {
   const tops = V.keep ? [...document.querySelectorAll('#view .tw, #view .exl')].map(e => e.scrollTop) : [];
   $('#view').innerHTML = (db && S.view !== 'home' && S.view !== 'about' ? classBar() : '') + bkBanner() + h;
   if (tops.length) document.querySelectorAll('#view .tw, #view .exl').forEach((e, i) => { if (tops[i]) e.scrollTop = tops[i]; });
-  const sel = $('#clsSel'); if (sel) sel.onchange = e => { setCur(e.target.value); S.st = S.ex = null; S.fq = ''; S.fid = ''; render(); };
+  const sel = $('#clsSel'); if (sel) sel.onchange = e => { setCur(e.target.value); resetClassFilters(); render(); };
 }
 const VIEWS = {};
 function setMenu(open) { $('#side').classList.toggle('open', open); $('#scrim').classList.toggle('on', open); }
+const deskScroll = () => matchMedia('(min-width:761px)').matches && !matchMedia('print').matches;
+const scEl = () => deskScroll() ? document.querySelector('main') : null;
+const scY = () => { const m = scEl(); return m ? m.scrollTop : window.scrollY; };
+const scTo = y => { const m = scEl(); if (m) m.scrollTop = y; else window.scrollTo(0, y); };
+const scBy = dy => { const m = scEl(); if (m) m.scrollTop += dy; else window.scrollBy(0, dy); };
 function render(keep = false) {
-  const y = window.scrollY; V.keep = keep;
+  const y = scY(); V.keep = keep;
   charts.forEach(c => c.destroy()); charts = [];
   if (S.view !== 'home' && S.view !== 'about' && !db) S.view = 'home';
   $('#brandSub').textContent = db ? db.name : 'مدیریت کلاس‌ها';
@@ -243,7 +289,7 @@ function render(keep = false) {
   $('#bottom').innerHTML = [['home', 'home', 'کلاس‌ها'], ...(db ? BOT : [])].map(([k, i, t]) => `<button class="${S.view === k ? 'on' : ''}" data-nav="${k}"><span>${ico(i)}</span>${t}</button>`).join('') + `<button data-more><span>${ico('menu')}</span>بیشتر</button>`;
   setMenu(false);
   VIEWS[S.view]();
-  window.scrollTo(0, keep ? y : 0);
+  scTo(keep ? y : 0);
 }
 const emptyHint = () => db.students.length ? '' : `<div class="card" style="margin:0 0 16px;border-color:#f6d98a;background:#fffaf0"><h3>شروع کار با «${esc(db.name)}»</h3><p class="sub" style="margin:0 0 12px">هنوز دانش‌آموزی در این کلاس ثبت نشده است. لیست کلاس را از اکسل یا متن وارد کنید، یا یکی‌یکی اضافه کنید.</p><div class="row"><button class="btn" data-act="importStudents">📥 ایمپورت از اکسل / متن</button><button class="btn sec" data-act="addStudent">+ دانش‌آموز جدید</button></div></div>`;
 
@@ -335,7 +381,7 @@ VIEWS.profile = function () {
   const info = (l, v) => `<div><div class="sub">${l}</div><b>${esc(v || '—')}</b></div>`;
   const box = t => `<div class="bxc ${S.pbt === t ? 'sel' : ''}" data-act="pbt" data-k="${t}" role="button" tabindex="0" title="نمایش و ویرایش موارد «${BEH[t].t}»" style="${chipStyle(t)}"><b>${fa(bc[t], 0)}</b><small>${BEH[t].t}</small></div>`;
   V(head('پروفایل دانش‌آموز', 'گزارش خودکار عملکرد تحصیلی، حضور و رفتار', `<button class="btn sec sm" data-act="prev">${ico('right')} قبلی</button><select id="stSel">${db.students.map(x => `<option value="${x.id}" ${x.id === s.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select><button class="btn sec sm" data-act="next">بعدی ${ico('left')}</button><button class="btn sec" data-act="summary" data-id="${s.id}">📊 برآیند کلی</button><button class="btn" data-act="print">${ico('print')} چاپ</button>`) + `
-  <div class="card row" style="gap:22px;align-items:center">${avatar(s, 'xl')}<div style="flex:1;min-width:240px"><h2 style="margin:0 0 8px">${esc(s.name)}</h2><div class="fg" style="grid-template-columns:repeat(3,1fr)">${info('نام پدر', s.father)}${info('کد ملی', s.nid)}${info('تاریخ تولد', s.birth)}${info('تلفن ولی', s.phone)}${info('نشانی', s.address)}${info('کلاس', db.name)}</div></div></div>
+  <div class="card row" style="gap:22px;align-items:center">${avatar(s, 'xl')}<div style="flex:1;min-width:240px"><h2 style="margin:0 0 8px">${esc(s.name)}</h2><div class="fg" style="grid-template-columns:repeat(3,1fr)">${info('نام پدر', s.father)}${info('کد ملی', s.nid)}${info('تاریخ تولد', s.birth)}${info('تلفن ولی', s.phone)}${info('نشانی', s.address)}${info('کلاس', db.name)}</div><div class="noprint" style="margin-top:10px;display:flex">${qaBtns(s)}</div></div></div>
   <div class="grid g4" style="margin-top:16px">
   <div class="card stat"><div class="bub" style="background:#fff0d1;color:#b7791f">${ico('target')}</div><div><small>میانگین</small><b>${fa(avg)}</b></div></div>
   <div class="card stat"><div class="bub" style="background:#e1f3f5;color:#0f7c8a">${ico('award')}</div><div><small>رتبه در کلاس</small><b>${rank ? fa(rank, 0) + ' از ' + fa(db.students.length, 0) : '—'}</b></div></div>
@@ -361,9 +407,9 @@ VIEWS.att = function () {
   const d = S.date, rec = db.att[d] || {}, dates = Object.keys(db.att).sort();
   V(head('حضور و غیاب', `${wd(d)} ${jd(d)}`, `${jdate('', d, 'id=dsel')}<button class="btn sec" data-act="allP">همه حاضر</button><button class="btn sec" data-act="restP">باقی‌مانده‌ها حاضر</button>${fqBox()}`) + kbHint('att') + `
   <div class="grid g21"><div class="card"><div class="tw" style="max-height:none"><table><tr><th>#</th><th>دانش‌آموز</th><th>وضعیت</th></tr>
-  ${vis().map((s, i) => `<tr class="${S.kon && S.kr === i ? 'kr' : ''}"><td>${fa(i + 1, 0)}</td><td><span class="row">${avatar(s)} ${esc(s.name)}</span></td><td><div class="seg">${Object.entries(ST).map(([k, t]) => `<button class="${k} ${rec[s.id] === k ? 'on' : ''}" data-act="mark" data-id="${s.id}" data-k="${k}">${t}</button>`).join('')}</div></td></tr>`).join('') || `<tr><td colspan=3 class="empty">${S.fq ? 'دانش‌آموزی با این نام پیدا نشد.' : 'ابتدا دانش‌آموز ثبت کنید.'}</td></tr>`}</table></div></div>
+  ${vis().map((s, i) => `<tr class="${S.kon && S.kr === i ? 'kr' : ''}"><td>${fa(i + 1, 0)}</td><td><span class="row">${avatar(s)} ${nl(s)}</span></td><td><div class="seg">${Object.entries(ST).map(([k, t]) => `<button class="${k} ${rec[s.id] === k ? 'on' : ''}" data-act="mark" data-id="${s.id}" data-k="${k}">${t}</button>`).join('')}</div></td></tr>`).join('') || `<tr><td colspan=3 class="empty">${S.fq ? 'دانش‌آموزی با این نام پیدا نشد.' : 'ابتدا دانش‌آموز ثبت کنید.'}</td></tr>`}</table></div></div>
   <div class="card"><h3>خلاصه حضور (${fa(dates.length, 0)} روز ثبت‌شده)</h3><div class="tw" style="max-height:480px"><table><tr><th>دانش‌آموز</th><th class="num">غ</th><th class="num">ت</th><th>حضور</th></tr>
-  ${db.students.map(s => { const c = attCount(s.id); return `<tr><td>${esc(s.name)}</td><td class="num">${fa(c.a, 0)}</td><td class="num">${fa(c.l, 0)}</td><td><div class="bar"><i style="width:${c.pct ?? 0}%;background:${c.pct < 85 ? 'var(--bad)' : 'var(--ok)'}"></i></div><small>${fa(c.pct, 0)}٪</small></td></tr>`; }).join('')}</table></div>
+  ${db.students.map(s => { const c = attCount(s.id); return `<tr><td>${nl(s)}</td><td class="num">${fa(c.a, 0)}</td><td class="num">${fa(c.l, 0)}</td><td><div class="bar"><i style="width:${c.pct ?? 0}%;background:${c.pct < 85 ? 'var(--bad)' : 'var(--ok)'}"></i></div><small>${fa(c.pct, 0)}٪</small></td></tr>`; }).join('')}</table></div>
   <p class="sub" style="margin:8px 0 0">غ = غایب · ت = تأخیر. فقط روزهایی را که کلاس داشتید ثبت کنید.</p></div></div>`);
   $('#dsel').onchange = e => { if (e.target.value) { S.date = e.target.value; render(true); } };
 };
@@ -376,7 +422,7 @@ VIEWS.beh = function () {
   V(head('رفتار و انضباط', `ثبت برای ${wd(d)} ${jd(d)}${bc ? ' · درس ' + esc(courseOf(bc)?.name) : ''}`, `${jdate('', d, 'id=dsel')}${fqBox()}`) + `
   <div class="card"><div class="row" style="margin:0 0 10px"><b style="font-size:13px">درس:</b><div class="chips"><button type="button" class="cc ${!bc ? 'on' : ''}" data-act="bcPick" data-id="">همه دروس</button>${db.courses.map(k => `<button type="button" class="cc ${bc === k.id ? 'on' : ''}" data-act="bcPick" data-id="${k.id}">${esc(k.name)}</button>`).join('')}</div></div><div class="sub" style="margin:0 0 8px">${bc ? `رفتارهایی که الان ثبت می‌کنید برای درس «${esc(courseOf(bc)?.name)}» ذخیره می‌شود و گزارش هم فقط همین درس را نشان می‌دهد.` : 'درس انتخاب نشده: رفتارهای جدید «بدون درس» ثبت می‌شوند و گزارش، جمع همه دروس را نشان می‌دهد. برای ثبت جداگانه، یک درس انتخاب کنید.'}</div><div class="legend" style="margin-bottom:6px">برای ثبت، روی دکمه رنگی کنار نام دانش‌آموز بزنید (دکمه سفید فقط برای نوشتن یادداشت است):
   ${Object.keys(BEH).map(behPill).join(' ')}</div>
-  ${L.map(s => { const t = today.filter(b => b.sid === s.id); return `<div class="brow"><span class="row">${avatar(s)} <b>${esc(s.name)}</b>${t.map(b => `<span class="chip" style="${chipStyle(b.t)}">${BEH[b.t].t}</span>`).join('')}</span>
+  ${L.map(s => { const t = today.filter(b => b.sid === s.id); return `<div class="brow"><span class="row">${avatar(s)} <b>${nl(s)}</b>${t.map(b => `<span class="chip" style="${chipStyle(b.t)}">${BEH[b.t].t}</span>`).join('')}</span>
   <span class="bbs"><button class="bb r" data-act="beh" data-id="${s.id}" data-k="r">− قرمز</button><button class="bb y" data-act="beh" data-id="${s.id}" data-k="y">− زرد</button><button class="bb g" data-act="beh" data-id="${s.id}" data-k="g">+ سبز</button><button class="bb G" data-act="beh" data-id="${s.id}" data-k="G">++ سبز پررنگ</button><button class="bb w" title="فقط یادداشت، بدون امتیاز" data-act="behW" data-id="${s.id}">⚪ یادداشت</button><button class="bb n" title="ثبت با توضیح" data-act="behNote" data-id="${s.id}">📝</button></span></div>`; }).join('') || `<div class="empty">${S.fq ? 'دانش‌آموزی با این نام پیدا نشد.' : 'ابتدا دانش‌آموز ثبت کنید.'}</div>`}</div>
   <div class="card" style="margin-top:16px"><h3>رفتارهای ثبت‌شده در ${jd(d)} (${fa(today.length, 0)})</h3>${today.length ? `<div class="tw" style="max-height:260px"><table><tr><th>دانش‌آموز</th><th>درس</th><th>نوع</th><th>توضیح</th><th></th></tr>${today.map(b => `<tr><td>${esc(stuOf(b.sid)?.name)}</td><td>${esc(courseOf(b.cid)?.name) || '—'}</td><td>${behPill(b.t)}</td><td>${esc(b.note) || '—'}</td><td class="num" style="white-space:nowrap"><button class="btn sec sm" data-act="editBeh" data-id="${b.id}">ویرایش</button> <button class="btn bad sm" data-act="delBeh" data-id="${b.id}">حذف</button></td></tr>`).join('')}</table></div>` : '<div class="empty">در این روز چیزی ثبت نشده است.</div>'}</div>
   <div class="card" style="margin-top:16px"><div class="top" style="margin-bottom:10px"><div><h3 style="margin:0">گزارش رفتار کلاس${bc ? ' — ' + esc(courseOf(bc)?.name) : ' (تجمیع همه دروس)'}</h3><div class="sub">جمع: ${Object.keys(BEH).map(k => `${BEH[k].t} ${fa(tot[k], 0)}`).join(' · ')}</div></div>
@@ -398,6 +444,7 @@ function behByCourse(L) {
   ${L.map(s => { let tot = 0; const cells = cs.map(k => { const v = sc(s.id, k.id); tot += v; return cell(v); }).join(''); let g = 0; if (gen) { g = db.beh.filter(b => b.sid === s.id && !b.cid).reduce((a, b) => a + bp(b.t), 0); tot += g; } return `<tr><td>${esc(s.name)}</td>${cells}${gen ? cell(g) : ''}${cell(tot)}</tr>`; }).join('')}</table></div></div>`;
 }
 VIEWS.exams = function () {
+  if (S.exCourse && !courseOf(S.exCourse)) S.exCourse = '';
   const list = db.exams.filter(e => !S.exCourse || e.courseId === S.exCourse).sort((a, b) => a.date < b.date ? 1 : -1);
   if (!db.exams.find(e => e.id === S.ex)) S.ex = list[0]?.id;
   const e = db.exams.find(x => x.id === S.ex);
@@ -407,14 +454,17 @@ VIEWS.exams = function () {
     detail = `<div class="card"><div class="top" style="margin-bottom:10px"><div><h3 style="margin:0">${esc(e.title)} — ${esc(courseOf(e.courseId)?.name)}</h3><div class="sub">${jd(e.date)} · نمره کل ${fa(e.max)}</div></div><div class="row"><button class="btn sec sm" data-act="editExam" data-id="${e.id}">ویرایش</button><button class="btn bad sm" data-act="delExam" data-id="${e.id}">حذف</button></div></div>
     <div class="row" style="margin-bottom:12px"><span class="pill ok">میانگین ${fa(mean(v))}</span><span class="pill warn">کمترین ${fa(v.length ? Math.min(...v) : null)}</span><span class="pill ok">بیشترین ${fa(v.length ? Math.max(...v) : null)}</span><span class="pill bad">مردود ${fa(v.filter(x => x < pass()).length, 0)} نفر</span></div>
     <div class="row noprint" style="margin-bottom:8px">${fqBox()}</div><div class="kbhint noprint">⌨️ داخل کادر نمره: <kbd>↑</kbd><kbd>↓</kbd> یا <kbd>Enter</kbd> = رفتن به نمره نفر بعد/قبل (بدون تغییر عدد)</div><div class="tw"><table><tr><th>#</th><th>دانش‌آموز</th><th class="num">نمره (از ${fa(e.max)})</th><th class="num">از ۲۰</th></tr>
-    ${vis().map((s, i) => `<tr><td>${fa(i + 1, 0)}</td><td>${esc(s.name)}</td><td class="num"><input type="number" class="sc" data-id="${s.id}" min="0" max="${e.max}" step="0.25" value="${e.scores[s.id] ?? ''}" style="width:90px"></td><td class="num" id="n${s.id}">${pill(norm(e, s.id))}</td></tr>`).join('')}</table></div></div>`;
+    ${vis().map((s, i) => `<tr><td>${fa(i + 1, 0)}</td><td><span class="row">${avatar(s)} ${nl(s)}</span></td><td class="num"><input type="number" class="sc" data-id="${s.id}" min="0" max="${e.max}" step="0.25" value="${e.scores[s.id] ?? ''}" style="width:90px"></td><td class="num" id="n${s.id}">${pill(norm(e, s.id))}</td></tr>`).join('')}</table></div></div>`;
   }
-  V(head('آزمون‌ها', 'ثبت آزمون و ورود نمرات (ذخیره خودکار)', `<select id="exC"><option value="">همه دروس</option>${db.courses.map(c => `<option value="${c.id}" ${S.exCourse === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select><button class="btn sec" data-act="gradeImport">📥 ورود نمرات از اکسل</button><button class="btn" data-act="addExam">+ آزمون جدید</button>`) + `
+  V(head('آزمون‌ها', 'ثبت آزمون و ورود نمرات (ذخیره خودکار)', `<button class="btn sec" data-act="gradeImport">📥 ورود نمرات از اکسل</button><button class="btn" data-act="addExam">+ آزمون جدید</button>`) + coursePick('exCPick', S.exCourse) + `
   <div class="grid" style="grid-template-columns:300px 1fr"><div class="card"><h3>فهرست آزمون‌ها (${fa(list.length, 0)})</h3><div class="exl">${list.map(x => `<button class="ex ${x.id === S.ex ? 'on' : ''}" data-act="pickExam" data-id="${x.id}"><b>${esc(x.title)}</b><br><small>${esc(courseOf(x.courseId)?.name)} · ${jd(x.date)}</small></button>`).join('') || '<div class="empty">خالی</div>'}</div></div>${detail}</div>`);
-  $('#exC').onchange = ev => { S.exCourse = ev.target.value; render(true); };
-  document.querySelectorAll('.sc').forEach(i => i.onchange = () => {
-    const sid = i.dataset.id; if (i.value === '') delete e.scores[sid]; else e.scores[sid] = Math.min(e.max, Math.max(0, +i.value));
-    if (i.value !== '') i.value = e.scores[sid]; save(); $('#n' + sid).innerHTML = pill(norm(e, sid)); toast('ذخیره شد');
+  document.querySelectorAll('.sc').forEach(i => { // با هر تایپ همان لحظه ذخیره می‌شود (نه فقط هنگام خروج از کادر)
+    const sid = i.dataset.id, commit = fin => {
+      const ex = db && db.exams.find(x => x.id === e.id); if (!ex) return; if (i.validity && i.validity.badInput) return;
+      if (i.value === '') delete ex.scores[sid]; else { ex.scores[sid] = Math.min(ex.max, Math.max(0, +i.value)); if (fin) i.value = ex.scores[sid]; }
+      save(); const nn = $('#n' + sid); if (nn) nn.innerHTML = pill(norm(ex, sid)); if (fin) toast('ذخیره شد');
+    };
+    i.oninput = () => commit(false); i.onchange = () => commit(true);
   });
 };
 const examForm = (e = {}) => `<div class="fg"><label class="f">درس<select name="courseId" required>${db.courses.map(c => `<option value="${c.id}" ${c.id === e.courseId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>${field('title', 'عنوان آزمون', e.title, 'text', 'required')}${field('date', 'تاریخ', e.date || iso(new Date()), 'date', 'required')}${field('max', 'بارم کل', e.max ?? 20, 'number', 'min=1 max=100 step=0.5 required')}</div>`;
@@ -527,7 +577,7 @@ function gradeImportDialog() {
   $('#gTx').oninput = e => { rows = parseText(e.target.value); show(); };
   $('#gX').onclick = () => d.close();
   $('#gOk').onclick = () => { const mx = +$('#gM').value || 20, scores = {}; res.filter(x => x.s).forEach(x => scores[x.s.id] = Math.min(mx, x.sc));
-    const e = { id: uid(), courseId: $('#gC').value, title: $('#gT').value.trim() || 'آزمون', date: $('#gD').value || iso(new Date()), max: mx, scores }; db.exams.push(e); S.ex = e.id; save(); d.close(); render(); toast('نمرات ثبت شد'); };
+    const e = { id: uid(), courseId: $('#gC').value, title: $('#gT').value.trim() || 'آزمون', date: $('#gD').value || iso(new Date()), max: mx, scores }; db.exams.push(e); S.ex = e.id; if (S.exCourse && S.exCourse !== e.courseId) S.exCourse = e.courseId; save(); d.close(); render(); toast('نمرات ثبت شد'); };
   d.showModal();
 }
 
@@ -551,7 +601,8 @@ const A = {
   addClass() { dlgOpen('کلاس جدید', classForm(), d => { const c = newClass(d.name.trim(), d.grade.trim()); readStep(d, c); R.classes.push(c); save(); setCur(c.id); S.view = 'students'; S.st = S.ex = null; render(); toast('کلاس ساخته شد. حالا دانش‌آموزان را اضافه کنید'); }); },
   editClass(id) { const c = R.classes.find(x => x.id === id); dlgOpen('ویرایش کلاس', classForm(c), d => { c.name = d.name.trim(); c.grade = d.grade.trim(); readStep(d, c); save(); render(true); }); },
   delClass(id) { const c = R.classes.find(x => x.id === id); if (confirm(`کلاس «${c.name}» با همه دانش‌آموزان، نمرات، حضور و غیاب و رفتارهایش حذف شود؟\n(پیشنهاد: اول پشتیبان بگیرید)`)) { snapNow('قبل از حذف کلاس'); R.classes = R.classes.filter(x => x.id !== id); if (db && db.id === id) db = null; save(); render(); } },
-  openClass(id) { setCur(id); S.view = 'students'; S.st = S.ex = null; S.q = ''; render(); },
+  openClass(id) { setCur(id); resetClassFilters(); S.view = 'students'; S.q = ''; render(); },
+  exCPick(id) { S.exCourse = S.exCourse === id ? '' : id; render(true); }, tkCPick(id) { S.tkCourse = S.tkCourse === id ? '' : id; render(true); }, akCPick(id) { S.actCourse = S.actCourse === id ? '' : id; render(true); },
   importStudents() { importDialog(); }, gradeImport() { gradeImportDialog(); },
   loadSample() { if (R.classes.some(c => c.students.length) && !confirm('همه داده‌های فعلی با داده نمونه جایگزین شود؟')) return; snapNow('قبل از داده نمونه'); R = migrate(sample()); db = null; S.view = 'home'; S.st = S.ex = null; save(); render(); toast('داده نمونه بارگذاری شد'); },
   addCourse() { dlgOpen('درس جدید', courseForm(), d => { db.courses.push({ id: uid(), name: d.name, coef: +d.coef }); save(); render(true); }); },
@@ -576,7 +627,7 @@ const A = {
   behOpen(id, el) { S.st = id; S.pbt = el.dataset.k; S.pbc = S.bc || ''; S.view = 'profile'; render(); },
   bcPick(id) { S.bc = S.bc === id ? '' : id; render(true); },
   delBeh(id) { db.beh = db.beh.filter(b => b.id !== id); save(); render(true); toast('حذف شد'); },
-  addExam() { if (!db.courses.length) return toast('ابتدا یک درس تعریف کنید'); dlgOpen('آزمون جدید', examForm(), d => { const e = { id: uid(), courseId: d.courseId, title: d.title, date: d.date, max: +d.max, scores: {} }; db.exams.push(e); S.ex = e.id; save(); render(true); }); },
+  addExam() { if (!db.courses.length) return toast('ابتدا یک درس تعریف کنید'); dlgOpen('آزمون جدید', examForm(), d => { const e = { id: uid(), courseId: d.courseId, title: d.title, date: d.date, max: +d.max, scores: {} }; db.exams.push(e); S.ex = e.id; if (S.exCourse && S.exCourse !== e.courseId) S.exCourse = e.courseId; save(); render(true); }); },
   editExam(id) { const e = db.exams.find(x => x.id === id); dlgOpen('ویرایش آزمون', examForm(e), d => { Object.assign(e, d, { max: +d.max }); Object.keys(e.scores).forEach(k => { if (e.scores[k] > e.max) e.scores[k] = e.max; }); save(); render(true); }); },
   delExam(id) { if (confirm('این آزمون حذف شود؟')) { db.exams = db.exams.filter(e => e.id !== id); save(); render(true); } },
   pickExam(id) { S.ex = id; render(true); }
@@ -664,6 +715,7 @@ document.addEventListener('keydown', e => { const v = e.target.closest && e.targ
 const tkStats = (t, list = db.students) => { const rs = list.map(s => t.res[s.id]), y = rs.filter(r => r?.st === 'y').length, n = rs.filter(r => r?.st === 'n').length, sc = rs.map(r => r?.sc).filter(v => v != null);
   return `<span class="pill ok">انجام شد ${fa(y, 0)}</span><span class="pill bad">انجام نشد ${fa(n, 0)}</span><span class="pill warn">ثبت نشده ${fa(list.length - y - n, 0)}</span>${t.max > 0 && sc.length ? `<span class="pill ok">میانگین نمره ${fa(mean(sc))} از ${fa(t.max)}</span>` : ''}`; };
 VIEWS.tasks = function () {
+  if (S.tkCourse && !courseOf(S.tkCourse)) S.tkCourse = '';
   const list = db.tasks.filter(t => !S.tkCourse || t.courseId === S.tkCourse).sort((a, b) => a.date < b.date ? 1 : -1);
   if (!db.tasks.find(t => t.id === S.tk)) S.tk = list[0]?.id;
   const t = taskOf(S.tk);
@@ -671,15 +723,17 @@ VIEWS.tasks = function () {
   if (t) detail = `<div class="card"><div class="top" style="margin-bottom:10px"><div><h3 style="margin:0">${esc(t.title)}${t.courseId ? ' — ' + esc(courseOf(t.courseId)?.name) : ''}</h3><div class="sub">تاریخ: ${jd(t.date)}${t.due ? ' · مهلت تحویل: ' + jd(t.due) : ''} · ${t.max > 0 ? 'بارم ' + fa(t.max) : 'بدون نمره (فقط انجام/عدم انجام)'}</div></div><div class="row noprint"><button class="btn sec sm" data-act="tkAll">✓ همه انجام شد</button><button class="btn sec sm" data-act="tkRest">✓ باقی‌مانده‌ها انجام شد</button><button class="btn sec sm" data-act="editTask" data-id="${t.id}">ویرایش</button><button class="btn bad sm" data-act="delTask" data-id="${t.id}">حذف</button></div></div>
     <div class="row" id="tkStats" style="margin-bottom:12px">${tkStats(t)}</div><div class="sub" style="margin:0 0 8px">دانش‌آموزانی که در تاریخ این تکلیف غایب بوده‌اند، خودکار «انجام نشد» (و نمره صفر) ثبت می‌شوند؛ هر وقت خواستید می‌توانید تغییرشان بدهید.</div><div class="row noprint" style="margin-bottom:8px">${fqBox()}</div>${kbHint('tasks', t.max > 0)}
     <div class="tw"><table><tr><th>#</th><th>دانش‌آموز</th><th>وضعیت</th>${t.max > 0 ? `<th class="num">نمره (از ${fa(t.max)})</th>` : ''}</tr>
-    ${vis().map((s, i) => { const r = t.res[s.id] || {}, ab = (db.att[t.date] || {})[s.id] === 'a'; return `<tr class="${S.kon && S.kr === i ? 'kr' : ''}" data-sid="${s.id}"><td>${fa(i + 1, 0)}</td><td><span class="row">${avatar(s)} ${esc(s.name)}${ab ? ' <span class="pill bad" title="در تاریخ این تکلیف غایب بوده">غایب' + (r.auto ? ' · خودکار' : '') + '</span>' : ''}</span></td><td><div class="seg"><button class="y ${r.st === 'y' ? 'on' : ''}" data-act="tkMark" data-id="${s.id}" data-k="y">✓ انجام شد</button><button class="n ${r.st === 'n' ? 'on' : ''}" data-act="tkMark" data-id="${s.id}" data-k="n">✗ انجام نشد</button></div></td>${t.max > 0 ? `<td class="num"><input type="number" class="tsc" data-id="${s.id}" min="0" max="${t.max}" step="0.25" value="${r.sc ?? ''}" style="width:90px"></td>` : ''}</tr>`; }).join('') || `<tr><td colspan=4 class="empty">${S.fq ? 'دانش‌آموزی با این نام پیدا نشد.' : 'ابتدا دانش‌آموز ثبت کنید.'}</td></tr>`}</table></div></div>`;
-  V(head('تکالیف', 'تعریف تکلیف و ثبت انجام/عدم انجام یا نمره (ذخیره خودکار)', `<select id="tkC"><option value="">همه دروس</option>${db.courses.map(c => `<option value="${c.id}" ${S.tkCourse === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select><button class="btn" data-act="addTask">+ تکلیف جدید</button>`) + `
+    ${vis().map((s, i) => { const r = t.res[s.id] || {}, ab = (db.att[t.date] || {})[s.id] === 'a'; return `<tr class="${S.kon && S.kr === i ? 'kr' : ''}" data-sid="${s.id}"><td>${fa(i + 1, 0)}</td><td><span class="row">${avatar(s)} ${nl(s)}${ab ? ' <span class="pill bad" title="در تاریخ این تکلیف غایب بوده">غایب' + (r.auto ? ' · خودکار' : '') + '</span>' : ''}</span></td><td><div class="seg"><button class="y ${r.st === 'y' ? 'on' : ''}" data-act="tkMark" data-id="${s.id}" data-k="y">✓ انجام شد</button><button class="n ${r.st === 'n' ? 'on' : ''}" data-act="tkMark" data-id="${s.id}" data-k="n">✗ انجام نشد</button></div></td>${t.max > 0 ? `<td class="num"><input type="number" class="tsc" data-id="${s.id}" min="0" max="${t.max}" step="0.25" value="${r.sc ?? ''}" style="width:90px"></td>` : ''}</tr>`; }).join('') || `<tr><td colspan=4 class="empty">${S.fq ? 'دانش‌آموزی با این نام پیدا نشد.' : 'ابتدا دانش‌آموز ثبت کنید.'}</td></tr>`}</table></div></div>`;
+  V(head('تکالیف', 'تعریف تکلیف و ثبت انجام/عدم انجام یا نمره (ذخیره خودکار)', `<button class="btn" data-act="addTask">+ تکلیف جدید</button>`) + coursePick('tkCPick', S.tkCourse) + `
   <div class="grid" style="grid-template-columns:300px 1fr"><div class="card"><h3>فهرست تکالیف (${fa(list.length, 0)})</h3><div class="exl">${list.map(x => { const y = db.students.filter(s => x.res[s.id]?.st === 'y').length, n = db.students.filter(s => x.res[s.id]?.st === 'n').length; return `<button class="ex ${x.id === S.tk ? 'on' : ''}" data-act="pickTask" data-id="${x.id}"><b>${esc(x.title)}</b><br><small>${x.courseId ? esc(courseOf(x.courseId)?.name) + ' · ' : ''}${jd(x.date)} · ✓${fa(y, 0)} ✗${fa(n, 0)}</small></button>`; }).join('') || '<div class="empty">خالی</div>'}</div></div>${detail}</div>`);
-  $('#tkC').onchange = ev => { S.tkCourse = ev.target.value; render(true); };
-  document.querySelectorAll('.tsc').forEach(i => i.onchange = () => {
-    const sid = i.dataset.id, r = t.res[sid] ??= {}; delete r.auto;
-    if (i.value === '') delete r.sc; else { r.sc = Math.min(t.max, Math.max(0, +i.value)); i.value = r.sc; if (!r.st) { r.st = 'y'; const row = i.closest('tr'); row.querySelector('.seg .y').classList.add('on'); row.querySelector('.seg .n').classList.remove('on'); } }
-    tidy(t, sid);
-    save(); $('#tkStats').innerHTML = tkStats(t); toast('ذخیره شد');
+  document.querySelectorAll('.tsc').forEach(i => {
+    const sid = i.dataset.id, commit = fin => {
+      const tt = db && db.tasks.find(x => x.id === t.id); if (!tt) return; if (i.validity && i.validity.badInput) return;
+      const r = tt.res[sid] ??= {}; delete r.auto;
+      if (i.value === '') delete r.sc; else { r.sc = Math.min(tt.max, Math.max(0, +i.value)); if (fin) i.value = r.sc; if (!r.st) { r.st = 'y'; const row = i.closest('tr'); row.querySelector('.seg .y').classList.add('on'); row.querySelector('.seg .n').classList.remove('on'); } }
+      tidy(tt, sid); save(); const ts = $('#tkStats'); if (ts) ts.innerHTML = tkStats(tt); if (fin) toast('ذخیره شد');
+    };
+    i.oninput = () => commit(false); i.onchange = () => commit(true);
   });
 };
 const taskForm = (t = {}) => `<div class="fg"><label class="f">درس (اختیاری)<select name="courseId"><option value="">— بدون درس —</option>${db.courses.map(c => `<option value="${c.id}" ${c.id === t.courseId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>${field('title', 'عنوان تکلیف', t.title, 'text', 'required')}${field('date', 'تاریخ تعریف تکلیف', t.date || iso(new Date()), 'date')}${field('due', 'مهلت تحویل (اختیاری)', t.due || '', 'date', 'data-clear=1')}${field('max', 'بارم (۰ = بدون نمره، فقط انجام/عدم انجام)', t.max ?? 0, 'number', 'min=0 max=100 step=0.5')}</div>`;
@@ -690,7 +744,7 @@ function profileTasks(s) {
   <div class="tw" style="max-height:300px"><table><tr><th>تاریخ</th><th>تکلیف</th><th>درس</th><th>وضعیت</th><th class="num">نمره</th></tr>${rows.map(t => { const r = t.res[s.id]; return `<tr><td>${jd(t.date)}</td><td>${esc(t.title)}</td><td>${esc(courseOf(t.courseId)?.name) || '—'}</td><td>${tkPill(r)}</td><td class="num">${t.max > 0 && r && r.sc != null ? fa(r.sc) + ' از ' + fa(t.max) : '—'}</td></tr>`; }).join('') || '<tr><td colspan=5 class="empty">هنوز تکلیفی تعریف نشده است.</td></tr>'}</table></div></div>`;
 }
 Object.assign(A, {
-  addTask() { dlgOpen('تکلیف جدید', taskForm(), d => { const t = { id: uid(), courseId: d.courseId, title: d.title.trim(), date: d.date, due: d.due || '', max: +d.max || 0, res: {} }; db.tasks.push(t); S.tk = t.id; save(); render(true); toast('تکلیف ثبت شد'); }); },
+  addTask() { dlgOpen('تکلیف جدید', taskForm(), d => { const t = { id: uid(), courseId: d.courseId, title: d.title.trim(), date: d.date, due: d.due || '', max: +d.max || 0, res: {} }; db.tasks.push(t); S.tk = t.id; if (S.tkCourse && S.tkCourse !== t.courseId) S.tkCourse = t.courseId; save(); render(true); toast('تکلیف ثبت شد'); }); },
   editTask(id) { const t = taskOf(id); dlgOpen('ویرایش تکلیف', taskForm(t), d => { Object.assign(t, { courseId: d.courseId, title: d.title.trim(), date: d.date, due: d.due || '', max: +d.max || 0 }); if (t.max > 0) Object.values(t.res).forEach(r => { if (r.sc > t.max) r.sc = t.max; }); save(); render(true); }); },
   delTask(id) { if (confirm('این تکلیف و وضعیت دانش‌آموزان در آن حذف شود؟')) { snapNow('قبل از حذف تکلیف'); db.tasks = db.tasks.filter(t => t.id !== id); save(); render(true); } },
   pickTask(id) { S.tk = id; S.kon = false; render(true); },
@@ -736,6 +790,7 @@ function profileActs(s) {
   <div class="tw" style="max-height:300px"><table><tr><th>تاریخ</th><th>فعالیت</th><th>درس</th><th>وضعیت</th><th class="num">نمره</th></tr>${rows.map(a => { const r = a.res[s.id]; return `<tr><td>${jd(a.date)}</td><td>${esc(a.title)}</td><td>${esc(courseOf(a.courseId)?.name) || '—'}</td><td>${tkPill(r)}</td><td class="num">${a.max > 0 && r && r.sc != null ? fa(r.sc) + ' از ' + fa(a.max) : '—'}</td></tr>`; }).join('')}</table></div></div>`;
 }
 VIEWS.acts = function () {
+  if (S.actCourse && !courseOf(S.actCourse)) S.actCourse = '';
   const list = db.acts.filter(a => !S.actCourse || a.courseId === S.actCourse).sort((a, b) => a.date < b.date ? 1 : -1);
   if (!db.acts.find(a => a.id === S.ak)) S.ak = list[0]?.id;
   const a = actOf(S.ak), L = a ? actStudents(a) : [];
@@ -745,19 +800,22 @@ VIEWS.acts = function () {
     detail = `<div class="card"><div class="top" style="margin-bottom:10px"><div><h3 style="margin:0">${esc(a.title)}${a.courseId ? ' — ' + esc(courseOf(a.courseId)?.name) : ''}</h3><div class="sub">تاریخ: ${jd(a.date)}${a.due ? ' · مهلت تحویل: ' + jd(a.due) : ''} · ${a.max > 0 ? 'بارم ' + fa(a.max) : 'بدون نمره (فقط انجام/عدم انجام)'} · ${a.ids ? 'شرکت‌کنندگان: ' + fa(L.length, 0) + ' نفر از ' + fa(db.students.length, 0) : 'همه دانش‌آموزان'}</div></div><div class="row noprint"><button class="btn sec sm" data-act="tkAll">✓ همه انجام شد</button><button class="btn sec sm" data-act="tkRest">✓ باقی‌مانده‌ها انجام شد</button><button class="btn sec sm" data-act="actMembers" data-id="${a.id}">👥 شرکت‌کنندگان</button><button class="btn sec sm" data-act="editAct" data-id="${a.id}">ویرایش</button><button class="btn bad sm" data-act="delAct" data-id="${a.id}">حذف</button></div></div>
     <div class="row" id="tkStats" style="margin-bottom:12px">${tkStats(a, L)}</div><div class="row noprint" style="margin-bottom:8px">${fqBox()}</div>${kbHint('tasks', a.max > 0)}
     <div class="tw"><table><tr><th>#</th><th>دانش‌آموز</th><th>وضعیت</th>${a.max > 0 ? `<th class="num">نمره (از ${fa(a.max)})</th>` : ''}${a.ids ? '<th class="noprint"></th>' : ''}</tr>
-    ${V2.map((s, i) => { const r = a.res[s.id] || {}; return `<tr class="${S.kon && S.kr === i ? 'kr' : ''}" data-sid="${s.id}"><td>${fa(i + 1, 0)}</td><td><span class="row">${avatar(s)} ${esc(s.name)}</span></td><td><div class="seg"><button class="y ${r.st === 'y' ? 'on' : ''}" data-act="tkMark" data-id="${s.id}" data-k="y">✓ انجام شد</button><button class="n ${r.st === 'n' ? 'on' : ''}" data-act="tkMark" data-id="${s.id}" data-k="n">✗ انجام نشد</button></div></td>${a.max > 0 ? `<td class="num"><input type="number" class="tsc" data-id="${s.id}" min="0" max="${a.max}" step="0.25" value="${r.sc ?? ''}" style="width:90px"></td>` : ''}${a.ids ? `<td class="num noprint"><button class="btn bad sm" data-act="actRemove" data-id="${s.id}" title="حذف از این فعالیت">✕</button></td>` : ''}</tr>`; }).join('') || `<tr><td colspan=5 class="empty">${fidMissing ? `«${esc(stuOf(S.fid).name)}» در این فعالیت شرکت ندارد. <button class="btn sm" data-act="actAdd" data-id="${S.fid}">افزودن به این فعالیت</button>` : S.fq ? 'دانش‌آموزی با این نام پیدا نشد.' : a.ids ? 'هنوز کسی انتخاب نشده؛ «شرکت‌کنندگان» را بزنید.' : 'ابتدا دانش‌آموز ثبت کنید.'}</td></tr>`}</table></div></div>`;
+    ${V2.map((s, i) => { const r = a.res[s.id] || {}; return `<tr class="${S.kon && S.kr === i ? 'kr' : ''}" data-sid="${s.id}"><td>${fa(i + 1, 0)}</td><td><span class="row">${avatar(s)} ${nl(s)}</span></td><td><div class="seg"><button class="y ${r.st === 'y' ? 'on' : ''}" data-act="tkMark" data-id="${s.id}" data-k="y">✓ انجام شد</button><button class="n ${r.st === 'n' ? 'on' : ''}" data-act="tkMark" data-id="${s.id}" data-k="n">✗ انجام نشد</button></div></td>${a.max > 0 ? `<td class="num"><input type="number" class="tsc" data-id="${s.id}" min="0" max="${a.max}" step="0.25" value="${r.sc ?? ''}" style="width:90px"></td>` : ''}${a.ids ? `<td class="num noprint"><button class="btn bad sm" data-act="actRemove" data-id="${s.id}" title="حذف از این فعالیت">✕</button></td>` : ''}</tr>`; }).join('') || `<tr><td colspan=5 class="empty">${fidMissing ? `«${esc(stuOf(S.fid).name)}» در این فعالیت شرکت ندارد. <button class="btn sm" data-act="actAdd" data-id="${S.fid}">افزودن به این فعالیت</button>` : S.fq ? 'دانش‌آموزی با این نام پیدا نشد.' : a.ids ? 'هنوز کسی انتخاب نشده؛ «شرکت‌کنندگان» را بزنید.' : 'ابتدا دانش‌آموز ثبت کنید.'}</td></tr>`}</table></div></div>`;
   }
-  V(head('فعالیت و پروژه', 'ثبت فعالیت‌ها و پروژه‌ها با نمره یا انجام/عدم انجام؛ می‌توانید فقط چند دانش‌آموز را در آن بیاورید (ذخیره خودکار)', `<select id="akC"><option value="">همه دروس</option>${db.courses.map(c => `<option value="${c.id}" ${S.actCourse === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select><button class="btn" data-act="addAct">+ فعالیت / پروژه جدید</button>`) + `
+  V(head('فعالیت و پروژه', 'ثبت فعالیت‌ها و پروژه‌ها با نمره یا انجام/عدم انجام؛ می‌توانید فقط چند دانش‌آموز را در آن بیاورید (ذخیره خودکار)', `<button class="btn" data-act="addAct">+ فعالیت / پروژه جدید</button>`) + coursePick('akCPick', S.actCourse) + `
   <div class="grid" style="grid-template-columns:300px 1fr"><div class="card"><h3>فهرست فعالیت‌ها (${fa(list.length, 0)})</h3><div class="exl">${list.map(x => { const st = actStudents(x), y = st.filter(s => x.res[s.id]?.st === 'y').length, n = st.filter(s => x.res[s.id]?.st === 'n').length; return `<button class="ex ${x.id === S.ak ? 'on' : ''}" data-act="pickAct" data-id="${x.id}"><b>${esc(x.title)}</b><br><small>${x.courseId ? esc(courseOf(x.courseId)?.name) + ' · ' : ''}${jd(x.date)} · ${x.ids ? '👥' + fa(st.length, 0) + ' · ' : ''}✓${fa(y, 0)} ✗${fa(n, 0)}</small></button>`; }).join('') || '<div class="empty">خالی</div>'}</div></div>${detail}</div>`);
-  $('#akC').onchange = ev => { S.actCourse = ev.target.value; render(true); };
-  document.querySelectorAll('.tsc').forEach(i => i.onchange = () => {
-    const sid = i.dataset.id, r = a.res[sid] ??= {};
-    if (i.value === '') delete r.sc; else { r.sc = Math.min(a.max, Math.max(0, +i.value)); i.value = r.sc; if (!r.st) { r.st = 'y'; const row = i.closest('tr'); row.querySelector('.seg .y').classList.add('on'); row.querySelector('.seg .n').classList.remove('on'); } }
-    tidy(a, sid); save(); $('#tkStats').innerHTML = tkStats(a, L); toast('ذخیره شد');
+  document.querySelectorAll('.tsc').forEach(i => {
+    const sid = i.dataset.id, commit = fin => {
+      const aa = db && db.acts.find(x => x.id === a.id); if (!aa) return; if (i.validity && i.validity.badInput) return;
+      const r = aa.res[sid] ??= {};
+      if (i.value === '') delete r.sc; else { r.sc = Math.min(aa.max, Math.max(0, +i.value)); if (fin) i.value = r.sc; if (!r.st) { r.st = 'y'; const row = i.closest('tr'); row.querySelector('.seg .y').classList.add('on'); row.querySelector('.seg .n').classList.remove('on'); } }
+      tidy(aa, sid); save(); const ts = $('#tkStats'); if (ts) ts.innerHTML = tkStats(aa, actStudents(aa)); if (fin) toast('ذخیره شد');
+    };
+    i.oninput = () => commit(false); i.onchange = () => commit(true);
   });
 };
 Object.assign(A, {
-  addAct() { dlgOpen('فعالیت / پروژه جدید', actForm(), d => { const a = { id: uid(), courseId: d.courseId, title: d.title.trim(), date: d.date, due: d.due || '', max: +d.max || 0, ids: d.who === 'sel' ? [] : null, res: {} }; db.acts.push(a); S.ak = a.id; save(); render(true); toast('فعالیت ثبت شد'); if (a.ids) setTimeout(() => actMembersDialog(a), 50); }); },
+  addAct() { dlgOpen('فعالیت / پروژه جدید', actForm(), d => { const a = { id: uid(), courseId: d.courseId, title: d.title.trim(), date: d.date, due: d.due || '', max: +d.max || 0, ids: d.who === 'sel' ? [] : null, res: {} }; db.acts.push(a); S.ak = a.id; if (S.actCourse && S.actCourse !== a.courseId) S.actCourse = a.courseId; save(); render(true); toast('فعالیت ثبت شد'); if (a.ids) setTimeout(() => actMembersDialog(a), 50); }); },
   editAct(id) { const a = actOf(id); dlgOpen('ویرایش فعالیت', actForm(a), d => { Object.assign(a, { courseId: d.courseId, title: d.title.trim(), date: d.date, due: d.due || '', max: +d.max || 0 }); if (a.max > 0) Object.values(a.res).forEach(r => { if (r.sc > a.max) r.sc = a.max; }); let ask = false; if (d.who === 'all') a.ids = null; else if (!a.ids) { a.ids = db.students.filter(s => a.res[s.id]).map(s => s.id); ask = true; } save(); render(true); if (ask) setTimeout(() => actMembersDialog(a), 50); }); },
   delAct(id) { if (confirm('این فعالیت و وضعیت دانش‌آموزان در آن حذف شود؟')) { snapNow('قبل از حذف فعالیت'); db.acts = db.acts.filter(a => a.id !== id); save(); render(true); } },
   pickAct(id) { S.ak = id; S.kon = false; render(true); },
@@ -768,6 +826,10 @@ Object.assign(A, {
 
 /* ================= lottery (قرعه‌کشی) ================= */
 const rnd = () => { const a = new Uint32Array(1); crypto.getRandomValues(a); return a[0] / 4294967296; };
+function randInt(n) { if (n <= 1) return 0; const lim = Math.floor(4294967296 / n) * n, a = new Uint32Array(1); do { crypto.getRandomValues(a); } while (a[0] >= lim); return a[0] % n; } // بدون سوگیری
+const shuffle = arr => { const a = [...arr]; for (let i = a.length - 1; i > 0; i--) { const j = randInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const isAbs = v => v === 'a' || v === 'e'; // غایب و غیبت مجاز هر دو «حاضر نیستند»
+const todayIso = () => iso(new Date());
 function drawInfo() {
   const cid = S.dr.c, rows = db.students.map(s => ({ s, avg: cid ? stuCourseAvg(s.id, cid) : stuAvg(s.id), b: behCount(s.id, db, '', '', cid), t: taskCount(s.id) }));
   const wa = rows.filter(x => x.avg != null).sort((a, b) => a.avg - b.avg), third = Math.max(1, Math.ceil(wa.length / 3));
@@ -783,62 +845,83 @@ function drawInfo() {
 }
 const CRIT = [['low', 'نمره پایین', 'یک‌سوم ضعیف‌ترِ کلاس یا زیر حد قبولی', '#d64545'], ['high', 'نمره بالا', 'یک‌سوم بالاترِ کلاس', '#1f9d63'], ['bad', 'رفتار نامناسب', 'امتیاز رفتاری منفی', '#e0702d'], ['good', 'رفتار مناسب', 'امتیاز رفتاری مثبت', '#2b9aa8'], ['tk', 'تکلیف انجام‌نشده', 'حداقل یک تکلیف انجام‌نشده', '#8e5bd1']];
 const activeCrit = () => CRIT.filter(c => S.dr[c[0]]).map(c => c[0]);
-function wsample(pool, k) { const p = [...pool], out = []; while (out.length < k && p.length) { const tot = p.reduce((a, x) => a + x.w, 0); let r = rnd() * tot, i = 0; for (; i < p.length - 1; i++) { r -= p[i].w; if (r < 0) break; } out.push(p.splice(i, 1)[0]); } return out; }
+function wsample(pool, k) { const p = shuffle(pool), out = []; while (out.length < k && p.length) { const tot = p.reduce((a, x) => a + x.w, 0); let r = rnd() * tot, i = 0; for (; i < p.length - 1; i++) { r -= p[i].w; if (r < 0) break; } out.push(p.splice(i, 1)[0]); } return out; }
 function choose(pool, k) {
   const act = activeCrit(); if (!act.length) return wsample(pool, k);
   const pr = pool.filter(x => act.some(c => x[c])), first = wsample(pr, Math.min(k, pr.length)), ids = new Set(first.map(x => x.s.id));
   return [...first, ...wsample(pool.filter(x => !ids.has(x.s.id)), k - first.length)];
 }
 function candidates(exclude = new Set()) {
-  const day = db.att[S.date] || {}; let c = drawInfo().filter(x => !exclude.has(x.s.id));
-  if (S.dr.present) c = c.filter(x => day[x.s.id] !== 'a');
+  const day = db.att[todayIso()] || {}; let c = drawInfo().filter(x => !exclude.has(x.s.id));
+  if (S.dr.present) c = c.filter(x => !isAbs(day[x.s.id]));
   return c;
 }
 function drawPick(n, exclude = new Set()) {
-  const cand = candidates(exclude), drawn = new Set(S.drawn[db.id] || []); let note = '';
+  const cand = candidates(exclude), drawn = new Set(db.drawn || []); let note = '';
   let pool = S.dr.norep ? cand.filter(x => !drawn.has(x.s.id)) : cand, picks = choose(pool, Math.min(n, pool.length));
   if (S.dr.norep && picks.length < n && cand.length > picks.length) { // everybody has had a turn: start a new round
-    S.drawn[db.id] = []; note = 'همه یک بار انتخاب شده بودند؛ دور جدید شروع شد.';
+    db.drawn = []; note = 'همه یک بار انتخاب شده بودند؛ دور جدید شروع شد.';
     const ids = new Set(picks.map(x => x.s.id)); picks = [...picks, ...choose(cand.filter(x => !ids.has(x.s.id)), Math.min(n - picks.length, cand.length - picks.length))];
   }
   if (picks.length < n) note += (note ? ' ' : '') + `فقط ${fa(picks.length, 0)} نفر قابل انتخاب بود.`;
   const act = activeCrit(); if (act.length && picks.length && !picks.some(x => act.some(c => x[c]))) note += ' کسی با معیارهای اولویت پیدا نشد؛ از بقیه انتخاب شد.';
-  S.drawn[db.id] = [...new Set([...(S.drawn[db.id] || []), ...picks.map(x => x.s.id)])];
+  picks = shuffle(picks); // ترتیب نمایش هم تصادفی است (اولویت‌دارها اول نیایند)
+  db.drawn = [...new Set([...(db.drawn || []), ...picks.map(x => x.s.id)])]; save();
   return { picks, note: note.trim() };
 }
 const whyTags = x => CRIT.filter(c => S.dr[c[0]] && x[c[0]]).map(c => `<span class="tag" style="background:${c[3]}1a;color:${c[3]}">${c[1]}</span>`).join('');
 const metaOf = x => `میانگین ${x.avg == null ? '—' : fa(x.avg)} · رفتار ${sgn(x.b.score)}${x.t.n ? ' · ' + fa(x.t.n, 0) + ' تکلیف ناقص' : ''}`;
-let lastDraw = [];
-function showDraw(res) {
-  let savedId = null;
-  const d = $('#dlg'); lastDraw = res.picks.map(x => x.s.id);
-  const reveal = () => {
-    if (!d.open) return;
-    d.innerHTML = `<form onsubmit="return false"><h3>${ico('dice')} نتیجه قرعه‌کشی — ${fa(res.picks.length, 0)} نفر</h3>${res.note ? `<div class="sub" style="color:var(--warn)">${esc(res.note)}</div>` : ''}
-    <div class="dwl">${res.picks.map((x, i) => `<div class="dwin" style="animation-delay:${i * 130}ms"><span class="dn">${fa(i + 1, 0)}</span>${avatar(x.s)}<div class="dnm"><b>${esc(x.s.name)}</b></div><button type="button" class="btn sec sm" data-swap="${x.s.id}" title="این نفر را با یک نفر دیگر عوض کن">تعویض</button></div>`).join('') || '<div class="empty">کسی برای انتخاب نبود.</div>'}</div>
-    <div class="row"><button type="button" class="btn" data-again>قرعه‌کشی دوباره</button><button type="button" class="btn" style="background:var(--ok)" data-save>📌 ثبت لیست</button><button type="button" class="btn sec" data-close>بستن</button></div></form>`;
-    d.querySelector('[data-close]').onclick = () => d.close();
-    const sv = d.querySelector('[data-save]'); if (savedId) sv.textContent = '📌 به‌روزرسانی لیست ثبت‌شده';
-    sv.onclick = () => {
-      if (!res.picks.length) return;
-      const old = savedId && db.draws.find(x => x.id === savedId), rec = { id: savedId || uid(), t: old ? old.t : Date.now(), course: S.dr.c, names: res.picks.map(x => ({ id: x.s.id, name: x.s.name })) };
-      if (old) Object.assign(old, rec); else db.draws.push(rec);
-      savedId = rec.id; save(); render(true); sv.textContent = '✓ ثبت شد (برای به‌روزرسانی دوباره بزنید)'; toast('لیست در جدول قرعه‌کشی ثبت شد');
-    };
-    d.querySelector('[data-again]').onclick = () => { S.drawn[db.id] = (S.drawn[db.id] || []).filter(id => !lastDraw.includes(id)); showDraw(drawPick(S.dr.n)); };
-    d.querySelectorAll('[data-swap]').forEach(b => b.onclick = () => {
-      const id = b.dataset.swap, cur = res.picks.map(x => x.s.id); S.drawn[db.id] = (S.drawn[db.id] || []).filter(x => x !== id);
-      const r = drawPick(1, new Set(cur)); if (!r.picks.length) return toast('نفر دیگری برای جایگزینی نیست');
-      res = { picks: res.picks.map(x => x.s.id === id ? r.picks[0] : x), note: '' }; lastDraw = res.picks.map(x => x.s.id); reveal();
-    });
-  };
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches || db.students.length < 2) { d.innerHTML = ''; if (!d.open) d.showModal(); return reveal(); }
-  d.innerHTML = `<form onsubmit="return false"><h3>${ico('dice')} در حال قرعه‌کشی…</h3><div class="roll" id="roll">…</div></form>`; if (!d.open) d.showModal();
-  const names = db.students.map(x => x.name), t = setInterval(() => { const r = $('#roll'); if (r) r.textContent = names[Math.floor(rnd() * names.length)]; }, 70);
-  setTimeout(() => { clearInterval(t); reveal(); }, 1300);
+const mkLast = (res, keep) => ({ cls: db.id, picks: res.picks.map(x => ({ id: x.s.id, name: x.s.name, why: CRIT.filter(c => S.dr[c[0]] && x[c[0]]).map(c => c[1]) })), note: res.note || '', savedId: keep ? keep.savedId : null, title: keep ? keep.title : '', t: Date.now() });
+let DW = null; // پنجره‌ی مستقل نمایش نتیجه
+function drawDoc(L) {
+  const e = x => String(x ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])), n = L.picks.length;
+  const fs = n <= 1 ? 4.6 : n <= 2 ? 3.8 : n <= 4 ? 3.1 : n <= 8 ? 2.4 : 1.9, minw = n <= 2 ? 38 : n <= 4 ? 28 : n <= 8 ? 21 : 16;
+  const cards = L.picks.map((p, i) => { const st = stuOf(p.id); return `<div class="w" style="animation-delay:${i * 220}ms"><span class="n">${fa(i + 1, 0)}</span>${st && st.photo ? `<img src="${st.photo}" alt="">` : `<span class="av" style="background:${colorOf(p.id)}">${e((p.name.trim()[0]) || '؟')}</span>`}<b class="nm">${e(st ? st.name : p.name)}</b>${p.why && p.why.length ? `<small>${e(p.why.join(' · '))}</small>` : ''}</div>`; }).join('');
+  return `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><title>نتیجه قرعه‌کشی — ${e(db.name)}</title><base href="${location.href}">
+<style>@font-face{font-family:Vazirmatn;src:url(fonts/Vazirmatn-Regular.ttf);font-weight:400}@font-face{font-family:Vazirmatn;src:url(fonts/Vazirmatn-Bold.ttf);font-weight:700}
+*{box-sizing:border-box}html,body{height:100%}body{margin:0;font-family:Vazirmatn,Tahoma,sans-serif;background:radial-gradient(circle at 20% 10%,#e3fafc,#fff5f5 55%,#fff9db);color:#16282d;display:flex;flex-direction:column}
+header{padding:18px 30px 0;text-align:center}h1{margin:0;font-size:clamp(22px,3vw,40px)}header p{margin:2px 0 0;color:#5b7279;font-size:clamp(14px,1.6vw,22px)}
+.note{color:#e67700;text-align:center;font-size:clamp(14px,1.5vw,20px);padding-top:6px}
+main{flex:1;display:flex;flex-wrap:wrap;gap:1.6vmin;align-content:center;justify-content:center;padding:2vmin 3vw}
+.w{background:#fff;border-radius:2vmin;box-shadow:0 6px 20px #0b728533;padding:1.4vmin 2vmin;display:flex;align-items:center;gap:2.4vmin;min-width:${minw}vw;max-width:96vw;animation:pop .5s cubic-bezier(.2,1.4,.4,1) both;border:.35vmin solid #0c8599}.w.spin .nm{color:#8aa0a6}.w.spin{border-color:#ffb703}
+.n{background:#ffb703;color:#3b2a00;border-radius:50%;width:${fs * 1.5}vw;height:${fs * 1.5}vw;max-width:90px;max-height:90px;display:grid;place-items:center;font-weight:700;font-size:${fs * .8}vw;flex:none}
+.av,.w img{width:${fs * 1.6}vw;height:${fs * 1.6}vw;max-width:90px;max-height:90px;border-radius:50%;object-fit:cover;display:grid;place-items:center;color:#fff;font-weight:700;font-size:${fs * .9}vw;flex:none}
+.nm{font-size:${fs}vw;line-height:1.3;flex:1}.w small{display:block;color:#5b7279;font-size:${Math.max(1.3, fs * .32)}vw;font-weight:400}
+@keyframes pop{from{opacity:0;transform:scale(.4) rotate(-6deg)}to{opacity:1;transform:none}}
+.bar{position:fixed;bottom:12px;left:12px;display:flex;gap:8px;opacity:.35;transition:.2s}.bar:hover{opacity:1}.bar button{border:0;background:#0b7285;color:#fff;border-radius:12px;padding:8px 16px;font:inherit;font-size:15px;cursor:pointer}
+@media print{.bar{display:none}}</style></head><body>
+<header><h1>🎲 نتیجه قرعه‌کشی — ${fa(n, 0)} نفر</h1><p>کلاس ${e(db.name)}${L.title ? ' · ' + e(L.title) : ''}</p></header>${L.note ? `<div class="note">${e(L.note)}</div>` : ''}
+<main>${cards || '<div style="font-size:30px;color:#5b7279">کسی برای انتخاب نبود.</div>'}</main>
+<div class="bar"><button id="sv" onclick="saveIt()">📌 ثبت لیست</button><button onclick="document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()">⛶ تمام‌صفحه</button><button onclick="again()">🎲 قرعه‌کشی دوباره</button><button onclick="closeMe()">✕ بستن</button></div>
+<script>const ALL=${JSON.stringify(db.students.map(x => x.name))};const SPIN=${L.noSpin ? 'false' : 'true'};function saveIt(){try{H.kelasamDraw.save();var b=document.getElementById('sv');b.textContent='✓ ثبت شد'}catch(e){alert('پنجره اصلی کلاسام بسته شده است')}}
+(function(){if(!SPIN||ALL.length<2)return;document.querySelectorAll('.w').forEach(function(w,i){var nm=w.querySelector('.nm'),real=nm.textContent,t0=Date.now(),dur=1100+i*750;w.classList.add('spin');var iv=setInterval(function(){var el=Date.now()-t0;if(el>=dur){clearInterval(iv);nm.textContent=real;w.classList.remove('spin');return}nm.textContent=ALL[Math.floor(Math.random()*ALL.length)]},el_gap(t0,dur))});function el_gap(){return 70}})();
+const H=(window.opener&&!window.opener.closed)?window.opener:window.parent;function again(){try{H.kelasamDraw.again()}catch(e){alert('پنجره اصلی کلاسام بسته شده است')}}function closeMe(){if(window.opener)window.close();else{try{H.document.getElementById('dlg').close()}catch(e){}}}</script></body></html>`;
 }
+function openDrawWindow(onlyRefresh) {
+  const L = S.lastDraw; if (!L) return; const html = drawDoc(L);
+  if (!CAPP) {
+    try {
+      let w = DW && !DW.closed ? DW : null;
+      if (!w && !onlyRefresh) w = window.open('', 'kelasam-draw', `popup=yes,width=${Math.min(1280, screen.availWidth)},height=${Math.min(820, screen.availHeight)}`);
+      if (w && w.document) { DW = w; w.document.open(); w.document.write(html); w.document.close(); if (!onlyRefresh) { try { w.focus(); } catch { } toast('نتیجه در پنجره‌ی جدا باز شد؛ می‌توانید آن را به صفحه دوم ببرید و همزمان در این پنجره کار کنید'); } return; }
+    } catch { }
+  }
+  if (onlyRefresh) return;
+  const d = $('#dlg'); d.innerHTML = `<form onsubmit="return false" style="padding:0;gap:0"><iframe id="drFr" style="width:100%;height:78vh;border:0;border-radius:18px 18px 0 0"></iframe><div class="row" style="padding:10px 16px"><button type="button" class="btn sec" data-close>بستن</button></div></form>`;
+  d.style.width = 'min(1200px,98vw)'; d.querySelector('#drFr').srcdoc = html; d.querySelector('[data-close]').onclick = () => d.close();
+  d.onclose = () => { d.style.width = ''; }; if (!d.open) d.showModal();
+}
+window.kelasamDraw = { again: () => A.drAgain(), save: () => { A.drSave(); } };
+function lastDrawCard() {
+  const L = S.lastDraw; if (!L || L.cls !== db.id) return '';
+  return `<div class="card" style="margin-top:16px;border:2px solid var(--brand)"><div class="top" style="margin-bottom:8px"><div><h3 style="margin:0">${ico('dice')} نتیجه آخرین قرعه‌کشی — ${fa(L.picks.length, 0)} نفر</h3><div class="sub">نتیجه در یک پنجره‌ی مستقل هم نمایش داده می‌شود؛ همان لحظه می‌توانید در همین برنامه (مثلاً صفحه «آزمون‌ها») برای دانش‌آموز نمره بگذارید.</div></div><div class="row noprint"><button class="btn sec sm" data-act="drShow">🖥 نمایش در پنجره جدا / تمام‌صفحه</button><button class="btn sm" data-act="drAgain">🎲 قرعه‌کشی دوباره</button></div></div>
+  ${L.note ? `<div class="sub" style="color:var(--warn);margin-bottom:6px">${esc(L.note)}</div>` : ''}
+  <div class="drres">${L.picks.map((p, i) => { const st = stuOf(p.id); return `<div class="dwin"><span class="dn">${fa(i + 1, 0)}</span>${st ? avatar(st) : ''}<div class="dnm"><b>${st ? nl(st) : esc(p.name)}</b>${p.why && p.why.length ? `<small class="sub" style="display:block">${esc(p.why.join(' · '))}</small>` : ''}</div><button type="button" class="btn sec sm noprint" data-act="drSwap" data-id="${p.id}" title="این نفر را با یک نفر دیگر عوض کن">تعویض</button></div>`; }).join('') || '<div class="empty">کسی برای انتخاب نبود.</div>'}</div>
+  <div class="row noprint" style="margin-top:12px"><input id="drTitle" placeholder="عنوان لیست (اختیاری؛ مثلاً: سؤال‌پرسی فصل ۳)" value="${esc(L.title)}" style="flex:1;min-width:200px"><button class="btn" style="background:var(--ok)" data-act="drSave">📌 ${L.savedId ? 'به‌روزرسانی لیست ثبت‌شده' : 'ثبت لیست'}</button></div></div>`;
+}
+document.addEventListener('input', e => { if (e.target.id === 'drTitle' && S.lastDraw) S.lastDraw.title = e.target.value; });
 VIEWS.draw = function () {
-  const st = S.dr, info = drawInfo(), day = db.att[S.date] || {}, cand = info.filter(x => !(st.present && day[x.s.id] === 'a')), drawn = (S.drawn[db.id] || []).filter(id => stuOf(id));
+  const st = S.dr, info = drawInfo(), today = todayIso(), day = db.att[today] || {}, cand = info.filter(x => !(st.present && isAbs(day[x.s.id]))), drawn = (db.drawn || []).filter(id => stuOf(id));
   const cnt = k => cand.filter(x => x[k]).length, ck = (k, t, sub = '') => `<label class="ck"><input type="checkbox" data-dr="${k}" ${st[k] ? 'checked' : ''}><span><b>${t}</b>${sub ? `<small>${sub}</small>` : ''}</span></label>`;
   if (st.n > cand.length) st.n = Math.max(1, cand.length);
   V(head('قرعه‌کشی', 'انتخاب تصادفی دانش‌آموزان برای سؤال پرسیدن یا بررسی کتاب', '') + emptyHint() + `
@@ -846,7 +929,7 @@ VIEWS.draw = function () {
   <div class="card"><h3>تنظیمات</h3>
     <div class="fg"><div class="f">تعداد افراد قرعه‌کشی<div class="stepper"><button type="button" class="btn sec sm" data-act="drStep" data-d="-1">−</button><input type="number" min="1" max="${Math.max(1, cand.length)}" value="${st.n}" data-dr="n"><button type="button" class="btn sec sm" data-act="drStep" data-d="1">+</button></div></div>
     <label class="f">درس (برای معیار نمره و رفتار)<select data-dr="c"><option value="">همه دروس (تجمیع)</option>${db.courses.map(k => `<option value="${k.id}" ${st.c === k.id ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}</select></label></div>
-    ${ck('present', 'فقط حاضرین', `غایب‌های ${wd(S.date)} ${jd(S.date)} (طبق حضور و غیاب) وارد قرعه‌کشی نشوند`)}
+    ${ck('present', 'فقط حاضرین', `غایب‌های امروز (${wd(today)} ${jd(today)}؛ طبق حضور و غیاب) وارد قرعه‌کشی نشوند${db.att[today] ? '' : ' — ⚠️ برای امروز هنوز حضور و غیاب ثبت نشده'}`)}
     ${ck('norep', 'تکرار نشود', 'تا همه یک بار انتخاب نشده‌اند، کسی دوباره انتخاب نشود')}
     <div class="row sub" style="align-items:center">${fa(drawn.length, 0)} نفر از ${fa(db.students.length, 0)} نفر در این دور انتخاب شده‌اند ${drawn.length ? '<button type="button" class="btn sec sm" data-act="drReset">شروع دور جدید</button>' : ''}</div>
   </div>
@@ -856,28 +939,39 @@ VIEWS.draw = function () {
     ${ck('graded', 'اولویت تدریجی', 'هرچه نمره ضعیف‌تر یا منفی‌های رفتاری بیشتر باشد، شانس انتخاب بیشتر است (تا ۷ برابر)')}
   </div></div>
   <div class="card" style="margin-top:16px;text-align:center"><div class="sub" style="margin-bottom:10px">${fa(cand.length, 0)} نفر در قرعه‌کشی شرکت داده می‌شوند${st.present && cand.length < db.students.length ? ` (${fa(db.students.length - cand.length, 0)} غایب کنار گذاشته شد)` : ''}</div><button class="btn big" data-act="doDraw" ${cand.length ? '' : 'disabled'}>${ico('dice')} قرعه‌کشی ${fa(Math.min(st.n, cand.length), 0)} نفر</button></div>
+  ${lastDrawCard()}
   ${drawListsCard()}
-  ${drawn.length ? `<div class="card" style="margin-top:16px"><h3>انتخاب‌شده‌ها در این دور</h3><div class="row">${drawn.map(id => `<span class="chip" style="background:#e1f3f5;color:#0f5f6b">${esc(stuOf(id).name)}</span>`).join('')}</div></div>` : ''}`);
+  ${drawn.length ? `<div class="card" style="margin-top:16px"><h3>انتخاب‌شده‌ها در این دور</h3><div class="row">${drawn.map(id => `<span class="chip" style="background:#e1f3f5;color:#0f5f6b">${nl(stuOf(id))}</span>`).join('')}</div></div>` : ''}`);
 };
 function drawListsCard() {
   const L = [...(db.draws || [])].sort((a, b) => b.t - a.t);
-  const row = (x, i) => { const dt = new Date(x.t); return `<tr><td>${fa(i + 1, 0)}</td><td style="white-space:nowrap">${jd(iso(dt))}<br><small class="sub">ساعت ${fnum(dt.toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }))}${x.course ? ' · ' + esc(courseOf(x.course)?.name || '') : ''}</small></td><td><div class="row" style="gap:6px">${x.names.map((n, j) => `<span class="chip" style="background:#e1f3f5;color:#0f5f6b"><b>${fa(j + 1, 0)}.</b> ${esc(stuOf(n.id)?.name || n.name)}</span>`).join('')}</div></td><td class="num noprint" style="white-space:nowrap"><button class="btn sec sm" data-act="drCopy" data-id="${x.id}" title="کپی اسامی">کپی</button> <button class="btn bad sm" data-act="drDel" data-id="${x.id}">حذف</button></td></tr>`; };
+  const row = (x, i) => { const dt = new Date(x.t); return `<tr><td>${fa(i + 1, 0)}</td><td style="white-space:nowrap">${x.title ? `<b>${esc(x.title)}</b><br>` : ''}${jd(iso(dt))}<br><small class="sub">ساعت ${fnum(dt.toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }))}${x.course ? ' · ' + esc(courseOf(x.course)?.name || '') : ''}</small></td><td><div class="row" style="gap:6px">${x.names.map((n, j) => `<span class="chip" style="background:#e1f3f5;color:#0f5f6b"><b>${fa(j + 1, 0)}.</b> ${stuOf(n.id) ? nl(stuOf(n.id)) : esc(n.name)}</span>`).join('')}</div></td><td class="num noprint" style="white-space:nowrap"><button class="btn sec sm" data-act="drRename" data-id="${x.id}" title="عنوان لیست">عنوان</button> <button class="btn sec sm" data-act="drCopy" data-id="${x.id}" title="کپی اسامی">کپی</button> <button class="btn bad sm" data-act="drDel" data-id="${x.id}">حذف</button></td></tr>`; };
   return `<div class="card" style="margin-top:16px"><div class="top" style="margin-bottom:8px"><div><h3 style="margin:0">📋 لیست‌های ثبت‌شده قرعه‌کشی (${fa(L.length, 0)})</h3><div class="sub">نتیجه قرعه‌کشی‌ها را با «ثبت لیست» اینجا نگه دارید تا اسامی یادتان نرود؛ هر وقت لازم نبود حذف کنید.</div></div>${L.length ? '<button class="btn bad sm noprint" data-act="drDelAll">پاک کردن همه</button>' : ''}</div>
-  ${L.length ? `<div class="tw wide" style="max-height:420px"><table><tr><th>#</th><th>زمان ثبت</th><th>اسامی قرعه‌کشی‌شده</th><th class="noprint"></th></tr>${L.map(row).join('')}</table></div>` : '<div class="empty">هنوز لیستی ثبت نشده است. بعد از قرعه‌کشی، دکمه «ثبت لیست» را بزنید.</div>'}</div>`;
+  ${L.length ? `<div class="tw wide" style="max-height:420px"><table><tr><th>#</th><th>عنوان و زمان ثبت</th><th>اسامی قرعه‌کشی‌شده</th><th class="noprint"></th></tr>${L.map(row).join('')}</table></div>` : '<div class="empty">هنوز لیستی ثبت نشده است. بعد از قرعه‌کشی، دکمه «ثبت لیست» را بزنید.</div>'}</div>`;
 }
 Object.assign(A, {
   drDel(id) { db.draws = db.draws.filter(x => x.id !== id); save(); render(true); toast('لیست حذف شد'); },
   drDelAll() { if (confirm('همه لیست‌های ثبت‌شده قرعه‌کشی پاک شود؟')) { db.draws = []; save(); render(true); } },
-  drCopy(id) { const x = db.draws.find(v => v.id === id); if (!x) return; const t = x.names.map((n, j) => `${j + 1}. ${stuOf(n.id)?.name || n.name}`).join('\n'); (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('اسامی کپی شد'), () => toast('کپی انجام نشد')); },
+  drCopy(id) { const x = db.draws.find(v => v.id === id); if (!x) return; const t = (x.title ? x.title + '\n' : '') + x.names.map((n, j) => `${j + 1}. ${stuOf(n.id)?.name || n.name}`).join('\n'); (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('اسامی کپی شد'), () => toast('کپی انجام نشد')); },
 });
 document.addEventListener('change', e => {
   const k = e.target.dataset && e.target.dataset.dr; if (!k || S.view !== 'draw') return;
   S.dr[k] = e.target.type === 'checkbox' ? e.target.checked : k === 'n' ? Math.max(1, Math.min(99, Math.floor(+e.target.value) || 1)) : e.target.value; render(true);
 });
 Object.assign(A, {
+  errCopy() { const t = `kelasam ${VERSION} · ${SERVER ? 'ویندوز' : CAPP ? 'اندروید' : 'وب'} · ${navigator.userAgent}\n` + ERRLOG.map(x => new Date(x.t).toLocaleString('fa-IR') + '  ' + x.m).join('\n'); (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('گزارش کپی شد'), () => prompt('این متن را برای پشتیبانی بفرستید:', t)); },
   drStep(_, el) { S.dr.n = Math.max(1, Math.min(99, S.dr.n + (+el.dataset.d))); render(true); },
-  drReset() { S.drawn[db.id] = []; render(true); toast('دور جدید شروع شد'); },
-  doDraw() { if (!db.students.length) return; showDraw(drawPick(S.dr.n)); setTimeout(() => render(true), 0); },
+  drReset() { db.drawn = []; save(); render(true); toast('دور جدید شروع شد'); },
+  doDraw() { if (!db.students.length) return; S.lastDraw = mkLast(drawPick(S.dr.n)); openDrawWindow(); render(true); },
+  drAgain() { const L = S.lastDraw; if (L && L.cls === db.id) { const ids = L.picks.map(p => p.id); db.drawn = (db.drawn || []).filter(id => !ids.includes(id)); } if (!db.students.length) return; S.lastDraw = mkLast(drawPick(S.dr.n), L && L.cls === db.id ? { savedId: null, title: L.title } : null); openDrawWindow(); render(true); },
+  drShow() { openDrawWindow(); },
+  drSwap(id) {
+    const L = S.lastDraw; if (!L) return; const cur = L.picks.map(p => p.id); db.drawn = (db.drawn || []).filter(x => x !== id);
+    const r = drawPick(1, new Set(cur)); if (!r.picks.length) { save(); return toast('نفر دیگری برای جایگزینی نیست'); }
+    const np = mkLast(r).picks[0]; L.picks = L.picks.map(p => p.id === id ? np : p); L.note = ''; openDrawWindow(true); render(true);
+  },
+  drSave() { const L = S.lastDraw; if (!L || !L.picks.length) return; const old = L.savedId && db.draws.find(x => x.id === L.savedId); const rec = { id: L.savedId || uid(), t: old ? old.t : Date.now(), course: S.dr.c, title: (L.title || '').trim(), names: L.picks.map(p => ({ id: p.id, name: p.name })) }; if (old) Object.assign(old, rec); else db.draws.push(rec); L.savedId = rec.id; save(); render(true); toast('لیست قرعه‌کشی ثبت شد'); },
+  drRename(id) { const x = db.draws.find(v => v.id === id); if (!x) return; const t = prompt('عنوان این لیست:', x.title || ''); if (t == null) return; x.title = t.trim(); save(); render(true); },
 });
 
 /* ================= keyboard (attendance & tasks) ================= */
@@ -891,7 +985,7 @@ function centerRow(row, dir = 0) {
     if (f < .05 || f > .95 || (dir > 0 && f > .5) || (dir < 0 && f < .5)) box.scrollTop += mid - b.height / 2;
   }
   const r = row.getBoundingClientRect(), vh = window.innerHeight - (matchMedia('(max-width:760px)').matches ? 64 : 0), mid = r.top + r.height / 2, f = mid / vh;
-  if (f < .12 || f > .88 || (!can && ((dir > 0 && f > .55) || (dir < 0 && f < .45)))) window.scrollBy(0, mid - vh / 2);
+  if (f < .12 || f > .88 || (!can && ((dir > 0 && f > .55) || (dir < 0 && f < .45)))) scBy(mid - vh / 2);
 }
 function scrollRow(dir = 0) { centerRow(document.querySelector('tr.kr'), dir); }
 document.addEventListener('keydown', e => {
@@ -940,14 +1034,48 @@ document.addEventListener('focusin', e => {
 });
 
 /* ================= about ================= */
-const VERSION = '2.0';
+const VERSION = '2.3';
+/* ---- گزارش پایداری: خطاهای برنامه و «بسته‌شدن ناگهانی» (اندروید) ثبت می‌شود تا علت قابل پیگیری باشد ---- */
+const RUN = { t: Date.now(), hb: Date.now(), state: 'fg' }, ERRLOG = [];
+const runSave = () => { try { KV.set('run', JSON.stringify(RUN)); } catch { } };
+let errT = null;
+function logErr(m) { m = String(m || '').slice(0, 300); const l = ERRLOG[ERRLOG.length - 1]; if (l && l.m === m) return; ERRLOG.push({ t: Date.now(), m }); while (ERRLOG.length > 30) ERRLOG.shift(); clearTimeout(errT); errT = setTimeout(() => { try { KV.set('errlog', JSON.stringify(ERRLOG)); } catch { } }, 1500); }
+addEventListener('error', e => logErr((e.message || 'خطا') + ' @' + String(e.filename || '').split('/').pop() + ':' + (e.lineno || '')));
+addEventListener('unhandledrejection', e => logErr('Promise: ' + ((e.reason && (e.reason.message || e.reason.msg)) || e.reason)));
+async function stabilityBoot() {
+  try {
+    const old = JSON.parse(await KV.get('errlog') || '[]'); if (Array.isArray(old)) ERRLOG.unshift(...old);
+    if (CAPP) {
+      const prev = JSON.parse(await KV.get('run') || 'null');
+      if (prev && prev.state === 'fg') ERRLOG.push({ t: prev.hb, m: '⚠️ برنامه در حالت باز ناگهان بسته شد (آخرین نشانه‌ی فعالیت همین زمان بود)' });
+    }
+  } catch { }
+  if (!CAPP) return;
+  RUN.state = 'fg'; runSave();
+  setInterval(() => { if (!document.hidden) { RUN.hb = Date.now(); runSave(); } }, 15000);
+  document.addEventListener('visibilitychange', () => { RUN.state = document.hidden ? 'bg' : 'fg'; RUN.hb = Date.now(); runSave(); });
+  addEventListener('pagehide', () => { RUN.state = 'bg'; runSave(); });
+}
+function androidBoot() { // دکمه بازگشت: به‌جای بستن یک‌باره‌ی برنامه، اول به صفحه قبل برمی‌گردد و برای خروج دو بار می‌خواهد
+  const AP = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.App; if (!CAPP || !AP) return;
+  let last = 0;
+  AP.addListener('backButton', () => {
+    const d = document.querySelector('dialog[open]'); if (d) { d.close(); return; }
+    if (S.view !== 'home') { S.view = 'home'; render(); return; }
+    if (Date.now() - last < 2200) { AP.exitApp(); return; }
+    last = Date.now(); toast('برای خروج، یک بار دیگر «بازگشت» را بزنید');
+  });
+  AP.addListener('pause', () => { RUN.state = 'bg'; runSave(); try { persist(); } catch { } });
+  AP.addListener('resume', () => { RUN.state = 'fg'; RUN.hb = Date.now(); runSave(); });
+}
 VIEWS.about = function () {
   const link = (t, u) => `<a class="ext" data-ext href="${u}" target="_blank" rel="noopener noreferrer"><b>${t}</b><span dir="ltr">${u}</span></a>`;
   V(`<div class="card about"><img src="icon-192.png" alt="kelasam" width="96" height="96"><h1>kelasam</h1><div class="sub">نسخه ${fnum(VERSION)}</div>
   <h2>تیم برنامه نویسی کلاسام</h2><p class="lead">در خدمت دبیران عزیز کشور</p>
   <div class="notice"><p>لطفا بدون اطلاع و اجازه ناشر برنامه را منتشر نکنید</p><p>از نشر بدون اجازه و بدون پرداخت وجه آن رضایت نداریم</p></div>
   <p class="lead">کلاسام وابسته به صفحه دبیران</p>
-  <h3>آدرس صفحات ما:</h3><div class="links">${link('وب‌سایت', 'https://www.dabiran7.ir')}${link('تلگرام', 'https://t.me/Dabiran7')}${link('ایتا', 'https://eitaa.com/dabiran7')}${link('اینستاگرام', 'https://www.instagram.com/dabiran7')}</div></div>`);
+  <h3>آدرس صفحات ما:</h3><div class="links">${link('وب‌سایت', 'https://www.dabiran7.ir')}${link('تلگرام', 'https://t.me/Dabiran7')}${link('ایتا', 'https://eitaa.com/dabiran7')}${link('اینستاگرام', 'https://www.instagram.com/dabiran7')}</div>
+  <details class="sub" style="margin-top:16px;text-align:start"><summary style="cursor:pointer">🩺 گزارش پایداری (برای پشتیبانی)</summary><div style="margin-top:8px">${ERRLOG.length ? ERRLOG.slice(-15).reverse().map(x => `<div style="border-top:1px solid var(--line);padding:4px 0"><small>${when(x.t)}</small><br>${esc(x.m)}</div>`).join('') : 'موردی ثبت نشده است.'}<div class="row" style="margin-top:8px"><button type="button" class="btn sec sm" data-act="errCopy">کپی گزارش</button></div></div></details></div>`);
 };
 document.addEventListener('click', e => { const a = e.target.closest('a[data-ext]'); if (a && CAPP) { e.preventDefault(); Capacitor.Plugins.Browser.open({ url: a.href }).catch(() => window.open(a.href, '_system')); return; } if (a && SERVER) { e.preventDefault(); fetch('api/openurl?u=' + encodeURIComponent(a.href), { method: 'POST' }).catch(() => {}); } });
 
@@ -1080,9 +1208,9 @@ $('#bExportAll').onclick = () => exportXlsx(R.classes, false);
 $('#bSync').onclick = () => syncDialog();
 
 /* ================= boot ================= */
-let deferred; addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; $('#bInstall').hidden = false; });
-$('#bInstall').onclick = async () => { if (deferred) { deferred.prompt(); deferred = null; $('#bInstall').hidden = true; } };
-if (/iphone|ipad/i.test(navigator.userAgent) && !navigator.standalone) { $('#bInstall').hidden = false; $('#bInstall').onclick = () => alert('در سافاری دکمه «اشتراک‌گذاری» را بزنید و «Add to Home Screen» را انتخاب کنید.'); }
+let deferred; addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; const bi = $('#bInstall'); if (bi) bi.hidden = false; });
+if ($('#bInstall')) $('#bInstall').onclick = async () => { if (deferred) { deferred.prompt(); deferred = null; $('#bInstall').hidden = true; } };
+if ($('#bInstall') && /iphone|ipad/i.test(navigator.userAgent) && !navigator.standalone) { $('#bInstall').hidden = false; $('#bInstall').onclick = () => alert('در سافاری دکمه «اشتراک‌گذاری» را بزنید و «Add to Home Screen» را انتخاب کنید.'); }
 (async () => {
   try {
     const r = await fetch('api/data', { cache: 'no-store' });
@@ -1109,6 +1237,6 @@ if (/iphone|ipad/i.test(navigator.userAgent) && !navigator.standalone) { $('#bIn
     if (fresh) { const s = await idbGet(); if (s) { try { const j = migrate(JSON.parse(s)); if (j) R = j; } catch { } } }
   } else $('#bInstall').remove();
   { let ch = false; R.classes.forEach(c => { ch = syncAbsent(c) || ch; }); if (ch) persist(); }
-  render(); syncBoot();
+  render(); syncBoot(); stabilityBoot(); androidBoot();
   setTimeout(autoSnap, 4000); setInterval(autoSnap, 30 * 60e3);
 })();
