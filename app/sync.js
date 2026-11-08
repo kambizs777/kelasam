@@ -198,7 +198,7 @@ function applyInPlace(t, s) {
 }
 function applyMerged(m) { // همگام (بدون await): بین خواندن R و نوشتن آن هیچ ویرایشی گم نمی‌شود
   const changed = !deq(stripPh(R), m);
-  if (changed) { const cur = db && db.id; applyInPlace(R, clone(m)); try { R.classes.forEach(syncAbsent); } catch { } setCur(cur); persist(); }
+  if (changed) { const cur = db && db.id; applyInPlace(R, clone(m)); try { R.classes.forEach(syncAbsent); } catch { } setCur(cur); persist(); if (typeof histReset === 'function') histReset(); }
   return changed;
 }
 function softRender() { if (userBusy()) { SYNC.rr = true; return; } render(true); }
@@ -218,7 +218,7 @@ async function syTakeOver(resp) { // دستگاه دیگری «همگام‌سا
   if (S) {
     try { await snapNow('قبل از جایگزینی با نسخه اجباری دستگاه دیگر'); SYNC.lastSnap = Date.now(); } catch { }
     const m = stripPh(migrate(S)); const cur = db && db.id;
-    applyInPlace(R, clone(m)); try { R.classes.forEach(syncAbsent); } catch { } setCur(cur); persist();
+    applyInPlace(R, clone(m)); try { R.classes.forEach(syncAbsent); } catch { } setCur(cur); persist(); if (typeof histReset === 'function') histReset();
     SY.rev = resp.rev; SYNC.base = clone(stripPh(R)); await syncPersistBase(); softRender();
     toast('این دستگاه با نسخه «همگام‌سازی اجباری» دستگاه دیگر یکی شد');
   }
@@ -357,14 +357,13 @@ function syncDialog(tab) {
     <label class="f">شناسه کاربری (انگلیسی)<input id="syU" autocomplete="username" dir="ltr" placeholder="مثلاً ali.rezaei" value="${esc(SY.user)}"></label>
     <label class="f">رمز عبور${reg ? ' (حداقل ۶ نویسه)' : ''}<input id="syP" type="password" autocomplete="${reg ? 'new-password' : 'current-password'}" dir="ltr"></label>
     ${reg ? '<label class="f">کد دعوت (اگر مدیر سرور داده است)<input id="syI" dir="ltr"></label>' : ''}
-    <details><summary class="sub" style="cursor:pointer">تنظیمات پیشرفته: آدرس سرور</summary><label class="f">آدرس پوشه سرور همگام‌سازی<input id="syUrl" dir="ltr" value="${esc(SY.url)}"></label></details>
     ${msgBox}
     <div class="row"><button type="button" class="btn" id="syGo">${reg ? 'ساخت حساب و اتصال' : 'ورود و اتصال'}</button><button type="button" class="btn sec" data-x>بستن</button></div></form>`;
     d.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => syncDialog(b.dataset.tab));
     d.querySelector('[data-x]').onclick = close;
     const go = async () => {
       const u = $('#syU').value.trim(), p = $('#syP').value, m = $('#syMsg'), btn = $('#syGo');
-      SY.url = $('#syUrl').value.trim() || SY_URL;
+      SY.url = SY.url || SY_URL;
       if (!u || !p) { m.textContent = 'شناسه و رمز را وارد کنید.'; return; }
       btn.disabled = true; btn.textContent = 'در حال اتصال…'; m.textContent = '';
       try { await syncLogin(reg ? 'register' : 'login', u, p, reg ? $('#syI').value : ''); syncDialog(); }
@@ -382,15 +381,13 @@ function syncDialog(tab) {
   <div class="row"><button type="button" class="btn" id="syNow">همگام‌سازی همین الان</button><button type="button" class="btn sec" id="syHist">نسخه‌های ذخیره‌شده در سرور</button></div>
   <div class="row"><button type="button" class="btn sec" id="syFSave">💾 ذخیره اجباری</button><button type="button" class="btn sec" id="syFSync">🔄 همگام‌سازی اجباری</button></div>
   <details><summary class="sub" style="cursor:pointer">گزینه‌های پیشرفته</summary><div class="row" style="margin-top:8px">
-  <button type="button" class="btn sec sm" id="syDown">جایگزینی اطلاعات این دستگاه با سرور</button><button type="button" class="btn sec sm" id="syUp">جایگزینی اطلاعات سرور با این دستگاه</button><button type="button" class="btn sec sm" id="syPw">تغییر رمز</button></div>
-  <label class="f" style="margin-top:8px">آدرس سرور<input id="syUrl" dir="ltr" value="${esc(SY.url)}"></label></details>
+  <button type="button" class="btn sec sm" id="syDown">جایگزینی اطلاعات این دستگاه با سرور</button><button type="button" class="btn sec sm" id="syUp">جایگزینی اطلاعات سرور با این دستگاه</button><button type="button" class="btn sec sm" id="syPw">تغییر رمز</button></div></details>
   <div id="syMsg" class="sub" style="min-height:1.4em"></div>
   <div class="row"><button type="button" class="btn bad" id="syOut">خروج از حساب</button><button type="button" class="btn sec" data-x>بستن</button></div>
   <p class="sub" style="margin:0">خروج از حساب هیچ اطلاعاتی را از این دستگاه پاک نمی‌کند.</p></form>`;
   d.querySelector('[data-x]').onclick = close;
   const msg = x => { const m = $('#syMsg'); if (m) m.textContent = x; };
   $('#syMode').onchange = e => { const v = e.target.value; SY.auto = v !== 'manual'; SY.ask = v !== 'auto'; syncPersist(true); syncStatus(); if (SY.auto) syncSoon(); };
-  $('#syUrl').onchange = e => { SY.url = e.target.value.trim() || SY_URL; syncPersist(true); };
   $('#syNow').onclick = async () => { $('#syNow').disabled = true; msg('در حال همگام‌سازی…'); const ok = await syncNow(true); if (ok) toast('همگام‌سازی کامل شد'); };
   $('#syFSave').onclick = () => forceSave(); $('#syFSync').onclick = async () => { await syncForce(); syncDialog(); };
   $('#syOut').onclick = async () => { if (confirm('از حساب خارج شوید؟ اطلاعات این دستگاه سر جایش می‌ماند و برنامه آفلاین ادامه می‌دهد.')) { await syncLogout(); syncDialog(); } };

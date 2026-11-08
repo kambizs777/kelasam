@@ -148,7 +148,7 @@ const pullServer = async (force) => {
     const j0 = await r.json();
     if (pushing || again || lv !== SYNC.LV) return; // وسط خواندن ویرایش شد: چیزی را جایگزین نکن
     const j = migrate(j0); VER = v;
-    if (j) { const cur = db && db.id; R = j; setCur(cur); render(true); toast('اطلاعات از فایل برنامه به‌روز شد'); }
+    if (j) { const cur = db && db.id; R = j; setCur(cur); histReset(); render(true); toast('اطلاعات از فایل برنامه به‌روز شد'); }
   } catch { }
 };
 async function sendOnce() {
@@ -160,12 +160,29 @@ async function sendOnce() {
         r = await fetch('api/data', { method: 'PUT', headers: { 'If-Match': VER, 'X-Force': '1' }, body: JSON.stringify(R) });
         if (r.ok) toast('فایل از جای دیگری تغییر کرده بود؛ نسخه قبلی آن در پوشه پشتیبان‌ها نگه داشته شد');
       }
-      if (!r.ok) throw 0;
+      if (!r.ok) { let t = ''; try { t = (await r.text()).slice(0, 160); } catch { } throw new Error('HTTP ' + r.status + ' ' + t); }
       try { VER = (await r.json()).v || VER; } catch { }
       saveInfo = { ok: true, t: Date.now() }; return true;
-    } catch { saveInfo.ok = false; showSave(); await new Promise(res => setTimeout(res, 800 * (n + 1))); }
+    } catch (e) { saveInfo.ok = false; logErr('ذخیره روی سرور: ' + ((e && e.message) || e)); showSave(); await new Promise(res => setTimeout(res, 800 * (n + 1))); }
   }
-  toast('ذخیره در فایل برنامه انجام نشد! برنامه را نبندید و پوشه برنامه را بررسی کنید.'); return false;
+  serverDown('ذخیره در فایل برنامه انجام نشد'); return false;
+}
+/* وقتی برنامه‌ی پشتِ صفحه (kelasam.exe) پاسخ نمی‌دهد: هشدار واضح + یک نسخه‌ی پشتیبان خودکار روی همین رایانه */
+let DOWN = false, downAt = 0, mirrorT = null;
+function mirrorLocal() { clearTimeout(mirrorT); mirrorT = setTimeout(() => { try { localStorage.setItem(KEY + '-emg', JSON.stringify({ t: Date.now(), d: R })); } catch { } }, 1500); }
+function serverDown(why) {
+  saveInfo.ok = false; showSave();
+  try { localStorage.setItem(KEY + '-emg', JSON.stringify({ t: Date.now(), d: R })); } catch { }
+  if (DOWN && Date.now() - downAt < 120000) return;
+  DOWN = true; downAt = Date.now();
+  try { download('kelasam-emergency-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.json', JSON.stringify(R), 'application/json'); } catch { }
+  toast('⚠️ ' + why + '. یک نسخه‌ی پشتیبان همین الان دانلود شد. پنجره را نبندید و kelasam.exe را دوباره اجرا کنید.');
+}
+function serverUp() { if (!DOWN) return; DOWN = false; saveInfo.ok = true; toast('اتصال به برنامه برقرار شد؛ ذخیره ادامه دارد'); pushServer(); }
+let pingFail = 0;
+async function pingServer() {
+  try { const r = await fetch('api/ping', { cache: 'no-store' }); if (!r.ok) throw 0; pingFail = 0; serverUp(); }
+  catch { if (++pingFail >= 2) serverDown('ارتباط با برنامه‌ی kelasam.exe قطع شده است'); }
 }
 function pushServer() { // coalesced: always writes the latest data, in order, as soon as possible
   again = true; showSave();
@@ -178,8 +195,35 @@ try { R = migrate(JSON.parse(localStorage.getItem(KEY))); } catch { }
 if (!R) { R = emptyRoot(); fresh = true; }
 let db = null; // current class
 const setCur = id => { db = R.classes.find(c => c.id === id) || null; };
-const persist = () => { const s = JSON.stringify(R); if (!SERVER) { try { localStorage.setItem(KEY, s); } catch { } if (!CAPP) idbPut(s); } const f = pushFile(s); return SERVER ? pushServer() : f; };
-const save = () => { try { R.classes.forEach(syncAbsent); } catch { } SYNC.LV++; SY.mod = nowS(); syncPersist(); persist(); syncSoon(); };
+const persist = () => { const s = JSON.stringify(R); if (SERVER) mirrorLocal(); if (!SERVER) { try { localStorage.setItem(KEY, s); } catch { } if (!CAPP) idbPut(s); } const f = pushFile(s); return SERVER ? pushServer() : f; };
+/* ---- واگرد / بازگرد (Undo / Redo) روی کل اطلاعات؛ ویرایش‌های پشت‌سرهم یک کادر متنی یک مرحله حساب می‌شود ---- */
+const HIST = { u: [], r: [], last: null, tt: 0, lt: false, busy: false };
+const histSize = a => a.reduce((n, x) => n + x.length, 0);
+function histInit() { try { HIST.last = JSON.stringify(R); } catch { HIST.last = null; } }
+function histReset() { HIST.u = []; HIST.r = []; histInit(); histUI(); }
+function histCapture() {
+  if (HIST.busy) return; let s; try { s = JSON.stringify(R); } catch { return; }
+  if (HIST.last == null) { HIST.last = s; return; } if (s === HIST.last) return;
+  const a = document.activeElement, typing = !!(a && /^(INPUT|TEXTAREA)$/.test(a.tagName)), co = typing && HIST.lt && Date.now() - HIST.tt < 1500 && HIST.u.length;
+  if (!co) { HIST.u.push(HIST.last); while (HIST.u.length > 1 && (HIST.u.length > 80 || histSize(HIST.u) > 120e6)) HIST.u.shift(); }
+  HIST.lt = typing; HIST.tt = Date.now(); HIST.last = s; HIST.r = []; histUI();
+}
+function histUI() { const u = $('#bUndo'), r = $('#bRedo'); if (u) { u.disabled = !HIST.u.length; u.title = HIST.u.length ? 'برگرداندن آخرین تغییر (Ctrl+Z) · ' + fa(HIST.u.length, 0) + ' مرحله' : 'تغییری برای واگرد نیست'; } if (r) { r.disabled = !HIST.r.length; r.title = HIST.r.length ? 'انجام دوباره‌ی تغییر برگردانده‌شده (Ctrl+Y) · ' + fa(HIST.r.length, 0) + ' مرحله' : 'چیزی برای بازگرد نیست'; } }
+function histGo(dir) {
+  const from = dir < 0 ? HIST.u : HIST.r, to = dir < 0 ? HIST.r : HIST.u;
+  if (!from.length) return toast(dir < 0 ? 'چیزی برای واگرد نیست' : 'چیزی برای بازگرد نیست');
+  try { document.activeElement && document.activeElement.blur && document.activeElement.blur(); } catch { }
+  const snap = from[from.length - 1]; let j; try { j = migrate(JSON.parse(snap)); } catch { } if (!j) return toast('بازگردانی انجام نشد');
+  from.pop(); to.push(HIST.last); const cur = db && db.id; HIST.busy = true;
+  try { R = j; setCur(cur); if (!db && S.view !== 'home' && S.view !== 'about') S.view = 'home'; histInit(); save(); } finally { HIST.busy = false; }
+  HIST.lt = false; render(true); histUI(); toast(dir < 0 ? '↶ آخرین تغییر برگردانده شد' : '↷ تغییر دوباره اعمال شد');
+}
+document.addEventListener('keydown', e => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return; const k = e.key.toLowerCase(); if (k !== 'z' && k !== 'y') return;
+  const t = e.target; if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return; if (document.querySelector('dialog[open]')) return;
+  e.preventDefault(); histGo(k === 'y' || e.shiftKey ? 1 : -1);
+});
+const save = () => { histCapture(); try { R.classes.forEach(syncAbsent); } catch { } SYNC.LV++; SY.mod = nowS(); syncPersist(); persist(); syncSoon(); };
 /* «ذخیره اجباری»: هر کادر نیمه‌تمام ثبت می‌شود، همه‌چیز روی حافظه نوشته و با خواندن دوباره تأیید می‌شود و یک پشتیبان هم ساخته می‌شود */
 async function forceSave(quiet) {
   try { const a = document.activeElement; if (a && a.blur && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) a.blur(); } catch { }
@@ -392,6 +436,7 @@ VIEWS.profile = function () {
   <div class="row" style="margin-top:10px">${S.pbt ? `<span class="pill" style="${chipStyle(S.pbt)}">فقط «${BEH[S.pbt].t}» (${fa(recs.length, 0)} مورد)</span><button class="btn sec sm noprint" data-act="pbt" data-k="${S.pbt}">نمایش همه</button>` : '<span class="sub noprint">برای دیدن و ویرایش موارد هر رنگ، روی کادر رنگی بزنید.</span>'}</div>
   <div class="tw" style="margin-top:12px;max-height:300px"><table><tr><th>تاریخ</th><th>درس</th><th>نوع</th><th>توضیح</th><th></th></tr>${recs.map(b => `<tr><td>${jd(b.date)}</td><td>${esc(courseOf(b.cid)?.name) || '—'}</td><td>${behPill(b.t)}</td><td>${esc(b.note) || '—'}</td><td class="num noprint" style="white-space:nowrap"><button class="btn sec sm" data-act="editBeh" data-id="${b.id}">ویرایش</button> <button class="btn bad sm" data-act="delBeh" data-id="${b.id}">حذف</button></td></tr>`).join('') || '<tr><td colspan=5 class="empty">هنوز رفتاری ثبت نشده است.</td></tr>'}</table></div></div>
   ${profileTasks(s)}${profileActs(s)}
+  <div class="card" style="margin-top:16px"><h3>📈 روند کلی آموزشی (ماهانه)</h3><div class="sub" style="margin:0 0 8px">خط‌ها: میانگین نمره آزمون (از ۲۰ به درصد)، درصد تکالیف انجام‌شده و درصد حضور · ستون‌ها: امتیاز خالص رفتار هر ماه (مثبت − منفی)</div><div class="chart" style="height:340px"><canvas id="c3"></canvas></div></div>
   <div class="grid g2" style="margin-top:16px"><div class="card"><h3>میانگین دروس در مقابل کلاس</h3><div class="chart"><canvas id="c1"></canvas></div></div>
   <div class="card"><h3>روند نمرات آزمون‌ها</h3><div class="chart"><canvas id="c2"></canvas></div></div></div>
   <div class="grid g2" style="margin-top:16px"><div class="card"><h3>غیبت‌های ماهانه</h3><div class="tw"><table><tr><th>ماه</th><th class="num">غایب</th><th class="num">تأخیر</th><th class="num">مجاز</th><th class="num">ثبت</th></tr>${Object.entries(months).map(([m, v]) => `<tr><td>${m}</td><td class="num">${fa(v.a, 0)}</td><td class="num">${fa(v.l, 0)}</td><td class="num">${fa(v.e, 0)}</td><td class="num">${fa(v.t, 0)}</td></tr>`).join('') || '<tr><td colspan=5 class="empty">ثبت نشده</td></tr>'}</table></div></div>
@@ -400,12 +445,33 @@ VIEWS.profile = function () {
   $('#pbc').onchange = e => { S.pbc = e.target.value; render(true); };
   S._n = [db.students[(idx - 1 + db.students.length) % db.students.length].id, db.students[(idx + 1) % db.students.length].id];
   mkChart('c1', { type: 'bar', data: { labels: db.courses.map(c => c.name), datasets: [{ label: s.name, data: db.courses.map(c => stuCourseAvg(s.id, c.id)), backgroundColor: '#0f7c8a', borderRadius: 6 }, { label: 'میانگین کلاس', data: db.courses.map(c => courseStats(c.id).avg), backgroundColor: '#c9d6d9', borderRadius: 6 }] }, options: { plugins: { legend: { display: true } }, scales: { y: { min: 0, max: 20, ticks: tickFa } } } });
+  trendChart(s);
   mkChart('c2', { type: 'line', data: { labels: exs.map(e => jday(e.date)), datasets: [{ data: exs.map(e => norm(e, s.id)), borderColor: '#f2a516', backgroundColor: '#f2a516', tension: .25, pointRadius: 4 }] }, options: { scales: { y: { min: 0, max: 20, ticks: tickFa }, x: { ticks: { maxTicksLimit: 8 } } } } });
 };
 
+function trendChart(s) {
+  const mk = d => { const j = isoJ(d); return j.jy * 100 + j.jm; }, B = {};
+  const at = d => B[mk(d)] ??= { ex: [], cx: [], ty: 0, tn: 0, ap: 0, at: 0, bs: 0, bn: 0 };
+  db.exams.forEach(e => { if (!e.date) return; const b = at(e.date); const v = norm(e, s.id); if (v != null) b.ex.push(v / 20 * 100); const all = db.students.map(x => norm(e, x.id)).filter(x => x != null); if (all.length) b.cx.push(mean(all) / 20 * 100); });
+  db.tasks.forEach(t => { if (!t.date) return; const r = t.res[s.id]; if (r && r.st) { const b = at(t.date); if (r.st === 'y') b.ty++; else b.tn++; } });
+  Object.keys(db.att).forEach(d => { const v = db.att[d] && db.att[d][s.id]; if (v) { const b = at(d); b.at++; if (v !== 'a') b.ap++; } });
+  db.beh.forEach(x => { if (x.sid === s.id && x.date && BEH[x.t]) { const b = at(x.date); b.bs += bp(x.t); b.bn++; } });
+  const keys = Object.keys(B).map(Number).sort((a, b) => a - b); if (!keys.length) return;
+  const mx = Math.max(4, ...keys.map(k => Math.abs(B[k].bs))) * 1.2;
+  const lab = keys.map(k => JM[k % 100 - 1] + ' ' + fnum(Math.floor(k / 100))), g = k => B[k], avg = a => a.length ? +(a.reduce((x, y) => x + y, 0) / a.length).toFixed(1) : null;
+  const line = (label, data, color, extra = {}) => Object.assign({ type: 'line', label, data, borderColor: color, backgroundColor: color, tension: .25, pointRadius: 4, spanGaps: true, yAxisID: 'y' }, extra);
+  mkChart('c3', { data: { labels: lab, datasets: [
+    { type: 'bar', label: 'امتیاز خالص رفتار', data: keys.map(k => g(k).bn ? +g(k).bs.toFixed(2) : null), backgroundColor: keys.map(k => g(k).bs < 0 ? '#d6454588' : '#1f9d6388'), borderRadius: 5, yAxisID: 'y2', order: 5, maxBarThickness: 34 },
+    line('میانگین نمره آزمون (٪)', keys.map(k => avg(g(k).ex)), '#f2a516'),
+    line('میانگین کلاس در آزمون (٪)', keys.map(k => avg(g(k).cx)), '#9aa9ad', { borderDash: [6, 5], pointRadius: 2 }),
+    line('تکالیف انجام‌شده (٪)', keys.map(k => (g(k).ty + g(k).tn) ? +(g(k).ty / (g(k).ty + g(k).tn) * 100).toFixed(1) : null), '#7048e8'),
+    line('حضور (٪)', keys.map(k => g(k).at ? +(g(k).ap / g(k).at * 100).toFixed(1) : null), '#0f7c8a')
+  ] }, options: { interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: true, labels: { usePointStyle: true, boxWidth: 8 } } },
+    scales: { y: { min: 0, max: 100, ticks: tickFa, title: { display: true, text: 'درصد' } }, y2: { position: 'right', grid: { drawOnChartArea: false }, suggestedMin: -mx, suggestedMax: mx, ticks: tickFa, title: { display: true, text: 'امتیاز رفتار' } }, x: { ticks: { maxTicksLimit: 14 } } } } });
+}
 VIEWS.att = function () {
   const d = S.date, rec = db.att[d] || {}, dates = Object.keys(db.att).sort();
-  V(head('حضور و غیاب', `${wd(d)} ${jd(d)}`, `${jdate('', d, 'id=dsel')}<button class="btn sec" data-act="allP">همه حاضر</button><button class="btn sec" data-act="restP">باقی‌مانده‌ها حاضر</button>${fqBox()}`) + kbHint('att') + `
+  V(head('حضور و غیاب', `${wd(d)} ${jd(d)}`, `<button class="btn sec" data-act="attPrev" title="آخرین روز ثبت‌شده‌ی قبل از این روز">▶ روز قبل</button>${jdate('', d, 'id=dsel')}<button class="btn sec" data-act="attNext" title="اولین روز ثبت‌شده‌ی بعد از این روز">روز بعد ◀</button><button class="btn sec" data-act="allP">همه حاضر</button><button class="btn sec" data-act="restP">باقی‌مانده‌ها حاضر</button>${fqBox()}`) + kbHint('att') + `
   <div class="grid g21"><div class="card"><div class="tw" style="max-height:none"><table><tr><th>#</th><th>دانش‌آموز</th><th>وضعیت</th></tr>
   ${vis().map((s, i) => `<tr class="${S.kon && S.kr === i ? 'kr' : ''}"><td>${fa(i + 1, 0)}</td><td><span class="row">${avatar(s)} ${nl(s)}</span></td><td><div class="seg">${Object.entries(ST).map(([k, t]) => `<button class="${k} ${rec[s.id] === k ? 'on' : ''}" data-act="mark" data-id="${s.id}" data-k="${k}">${t}</button>`).join('')}</div></td></tr>`).join('') || `<tr><td colspan=3 class="empty">${S.fq ? 'دانش‌آموزی با این نام پیدا نشد.' : 'ابتدا دانش‌آموز ثبت کنید.'}</td></tr>`}</table></div></div>
   <div class="card"><h3>خلاصه حضور (${fa(dates.length, 0)} روز ثبت‌شده)</h3><div class="tw" style="max-height:480px"><table><tr><th>دانش‌آموز</th><th class="num">غ</th><th class="num">ت</th><th>حضور</th></tr>
@@ -675,18 +741,31 @@ const JM = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مر�
 const jIso = (y, m, d) => { const g = JAL.toG(y, m, d); return `${g.gy}-${String(g.gm).padStart(2, '0')}-${String(g.gd).padStart(2, '0')}`; };
 const isoJ = s => { const [y, m, d] = s.split('-').map(Number); return JAL.toJ(y, m, d); };
 const jDisp = s => { if (!s) return ''; const j = isoJ(s); return fnum(`${j.jy}/${String(j.jm).padStart(2, '0')}/${String(j.jd).padStart(2, '0')}`); };
+const MARKS = { att: 'حضور و غیاب', beh: 'رفتار', exam: 'آزمون', task: 'تکلیف', act: 'فعالیت' };
+function markedDays(kind) {
+  const out = new Set(); if (!db) return out;
+  const k = kind || ({ att: 'att', beh: 'beh', exams: 'exam', tasks: 'task', acts: 'act' }[S.view] || 'all'), on = x => k === 'all' || k === x;
+  if (on('att')) Object.keys(db.att).forEach(d => { if (db.att[d] && Object.values(db.att[d]).some(Boolean)) out.add(d); });
+  if (on('beh')) db.beh.forEach(b => { if (b.date && (k === 'all' || !S.bc || b.cid === S.bc)) out.add(b.date); });
+  if (on('exam')) db.exams.forEach(e => e.date && out.add(e.date));
+  if (on('task')) db.tasks.forEach(t => t.date && out.add(t.date));
+  if (on('act')) db.acts.forEach(a => a.date && out.add(a.date));
+  return out;
+}
+const markLabel = kind => { const k = kind || ({ att: 'att', beh: 'beh', exams: 'exam', tasks: 'task', acts: 'act' }[S.view] || 'all'); return k === 'all' ? 'روزهای دارای اطلاعات ثبت‌شده' : 'روزهای دارای ' + MARKS[k] + ' ثبت‌شده'; };
 const jdate = (name, v = '', x = '') => `<span class="jdw"><input type="text" class="jdv" readonly value="${jDisp(v)}" placeholder="📅 انتخاب تاریخ"><input type="hidden" ${name ? `name="${name}"` : ''} value="${esc(v)}" ${x}></span>`;
 function openPicker(hid) {
   let dlg = $('#jpk'); if (!dlg) { dlg = document.createElement('dialog'); dlg.id = 'jpk'; document.body.appendChild(dlg); }
-  const clearable = hid.dataset.clear === '1', todayIso = iso(new Date());
+  const clearable = hid.dataset.clear === '1', todayIso = iso(new Date()), marks = markedDays(hid.dataset.mark), mlabel = markLabel(hid.dataset.mark);
   let f = isoJ(hid.value || todayIso), vy = f.jy, vm = f.jm;
   const shift = (j, n) => { const g = JAL.toG(j.jy, j.jm, j.jd), dt = new Date(g.gy, g.gm - 1, g.gd + n, 12); return JAL.toJ(dt.getFullYear(), dt.getMonth() + 1, dt.getDate()); };
   const draw = () => {
     const g1 = JAL.toG(vy, vm, 1), lead = (new Date(g1.gy, g1.gm - 1, g1.gd, 12).getDay() + 1) % 7, n = JAL.len(vy, vm);
     let cells = '<i></i>'.repeat(lead);
-    for (let d = 1; d <= n; d++) { const di = jIso(vy, vm, d), cls = [di === hid.value ? 'sel' : '', di === todayIso ? 'today' : '', (lead + d - 1) % 7 === 6 ? 'fri' : '', f.jy === vy && f.jm === vm && f.jd === d ? 'fd' : ''].join(' '); cells += `<button type="button" class="${cls}" data-d="${d}">${fnum(d)}</button>`; }
+    for (let d = 1; d <= n; d++) { const di = jIso(vy, vm, d), cls = [di === hid.value ? 'sel' : '', di === todayIso ? 'today' : '', (lead + d - 1) % 7 === 6 ? 'fri' : '', marks.has(di) ? 'has' : '', f.jy === vy && f.jm === vm && f.jd === d ? 'fd' : ''].join(' '); cells += `<button type="button" class="${cls}" data-d="${d}">${fnum(d)}</button>`; }
     dlg.innerHTML = `<div class="jp"><div class="jh"><button type="button" class="btn sec sm" data-pm title="ماه قبل">▶</button><select data-m>${JM.map((m, i) => `<option value="${i + 1}" ${i + 1 === vm ? 'selected' : ''}>${m}</option>`).join('')}</select><select data-y>${Array.from({ length: 31 }, (_, i) => vy - 15 + i).map(y => `<option value="${y}" ${y === vy ? 'selected' : ''}>${fnum(y)}</option>`).join('')}</select><button type="button" class="btn sec sm" data-nm title="ماه بعد">◀</button></div>
     <div class="jgrid jw">${['ش', 'ی', 'د', 'س', 'چ', 'پ', 'ج'].map((w, i) => `<b class="${i === 6 ? 'fri' : ''}">${w}</b>`).join('')}</div><div class="jgrid">${cells}</div>
+    ${marks.size ? `<div class="sub jleg"><i></i> ${mlabel}</div>` : ''}
     <div class="row" style="justify-content:space-between"><button type="button" class="btn sm" data-today>امروز</button>${clearable ? '<button type="button" class="btn bad sm" data-clr>پاک کردن</button>' : ''}<button type="button" class="btn sec sm" data-x>بستن</button></div><div class="sub jkb" style="text-align:center">⌨️ جهت‌نما: روز · PageUp/PageDown: ماه · Enter: انتخاب</div></div>`;
     const fd = dlg.querySelector('.fd'); if (fd) fd.focus({ preventScroll: true });
   };
@@ -875,18 +954,18 @@ const mkLast = (res, keep) => ({ cls: db.id, picks: res.picks.map(x => ({ id: x.
 let DW = null; // پنجره‌ی مستقل نمایش نتیجه
 function drawDoc(L) {
   const e = x => String(x ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])), n = L.picks.length;
-  const fs = n <= 1 ? 4.6 : n <= 2 ? 3.8 : n <= 4 ? 3.1 : n <= 8 ? 2.4 : 1.9, minw = n <= 2 ? 38 : n <= 4 ? 28 : n <= 8 ? 21 : 16;
-  const cards = L.picks.map((p, i) => { const st = stuOf(p.id); return `<div class="w" style="animation-delay:${i * 220}ms"><span class="n">${fa(i + 1, 0)}</span>${st && st.photo ? `<img src="${st.photo}" alt="">` : `<span class="av" style="background:${colorOf(p.id)}">${e((p.name.trim()[0]) || '؟')}</span>`}<b class="nm">${e(st ? st.name : p.name)}</b>${p.why && p.why.length ? `<small>${e(p.why.join(' · '))}</small>` : ''}</div>`; }).join('');
+  const fs = n <= 2 ? 2.6 : n <= 4 ? 2.3 : n <= 8 ? 1.9 : 1.6, minw = n <= 2 ? 26 : n <= 4 ? 22 : n <= 8 ? 18 : 14;
+  const cards = L.picks.map((p, i) => { const st = stuOf(p.id); return `<div class="w" style="animation-delay:${i * 220}ms"><span class="n">${fa(i + 1, 0)}</span>${st && st.photo ? `<img src="${st.photo}" alt="">` : `<span class="av" style="background:${colorOf(p.id)}">${e((p.name.trim()[0]) || '؟')}</span>`}<b class="nm">${e(st ? st.name : p.name)}</b></div>`; }).join('');
   return `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><title>نتیجه قرعه‌کشی — ${e(db.name)}</title><base href="${location.href}">
 <style>@font-face{font-family:Vazirmatn;src:url(fonts/Vazirmatn-Regular.ttf);font-weight:400}@font-face{font-family:Vazirmatn;src:url(fonts/Vazirmatn-Bold.ttf);font-weight:700}
 *{box-sizing:border-box}html,body{height:100%}body{margin:0;font-family:Vazirmatn,Tahoma,sans-serif;background:radial-gradient(circle at 20% 10%,#e3fafc,#fff5f5 55%,#fff9db);color:#16282d;display:flex;flex-direction:column}
-header{padding:18px 30px 0;text-align:center}h1{margin:0;font-size:clamp(22px,3vw,40px)}header p{margin:2px 0 0;color:#5b7279;font-size:clamp(14px,1.6vw,22px)}
+header{padding:18px 30px 0;text-align:center}h1{margin:0;font-size:clamp(17px,2vw,26px)}header p{margin:2px 0 0;color:#5b7279;font-size:clamp(12px,1.1vw,15px)}
 .note{color:#e67700;text-align:center;font-size:clamp(14px,1.5vw,20px);padding-top:6px}
 main{flex:1;display:flex;flex-wrap:wrap;gap:1.6vmin;align-content:center;justify-content:center;padding:2vmin 3vw}
-.w{background:#fff;border-radius:2vmin;box-shadow:0 6px 20px #0b728533;padding:1.4vmin 2vmin;display:flex;align-items:center;gap:2.4vmin;min-width:${minw}vw;max-width:96vw;animation:pop .5s cubic-bezier(.2,1.4,.4,1) both;border:.35vmin solid #0c8599}.w.spin .nm{color:#8aa0a6}.w.spin{border-color:#ffb703}
-.n{background:#ffb703;color:#3b2a00;border-radius:50%;width:${fs * 1.5}vw;height:${fs * 1.5}vw;max-width:90px;max-height:90px;display:grid;place-items:center;font-weight:700;font-size:${fs * .8}vw;flex:none}
-.av,.w img{width:${fs * 1.6}vw;height:${fs * 1.6}vw;max-width:90px;max-height:90px;border-radius:50%;object-fit:cover;display:grid;place-items:center;color:#fff;font-weight:700;font-size:${fs * .9}vw;flex:none}
-.nm{font-size:${fs}vw;line-height:1.3;flex:1}.w small{display:block;color:#5b7279;font-size:${Math.max(1.3, fs * .32)}vw;font-weight:400}
+.w{background:#fff;border-radius:2vmin;box-shadow:0 6px 20px #0b728533;padding:1vmin 1.6vmin;display:flex;align-items:center;gap:2.4vmin;min-width:${minw}vw;max-width:96vw;animation:pop .5s cubic-bezier(.2,1.4,.4,1) both;border:.35vmin solid #0c8599}.w.spin .nm{color:#8aa0a6}.w.spin{border-color:#ffb703}
+.n{background:#ffb703;color:#3b2a00;border-radius:50%;width:clamp(26px,${fs * 1.5}vw,38px);height:clamp(26px,${fs * 1.5}vw,38px);display:grid;place-items:center;font-weight:700;font-size:clamp(13px,${fs * .8}vw,20px);flex:none}
+.av,.w img{width:clamp(28px,${fs * 1.6}vw,42px);height:clamp(28px,${fs * 1.6}vw,42px);border-radius:50%;object-fit:cover;display:grid;place-items:center;color:#fff;font-weight:700;font-size:clamp(14px,${fs * .9}vw,22px);flex:none}
+.nm{font-size:clamp(14px,${fs}vw,24px);line-height:1.3;flex:1}
 @keyframes pop{from{opacity:0;transform:scale(.4) rotate(-6deg)}to{opacity:1;transform:none}}
 .bar{position:fixed;bottom:12px;left:12px;display:flex;gap:8px;opacity:.35;transition:.2s}.bar:hover{opacity:1}.bar button{border:0;background:#0b7285;color:#fff;border-radius:12px;padding:8px 16px;font:inherit;font-size:15px;cursor:pointer}
 @media print{.bar{display:none}}</style></head><body>
@@ -902,7 +981,7 @@ function openDrawWindow(onlyRefresh) {
   if (!CAPP) {
     try {
       let w = DW && !DW.closed ? DW : null;
-      if (!w && !onlyRefresh) w = window.open('', 'kelasam-draw', `popup=yes,width=${Math.min(1280, screen.availWidth)},height=${Math.min(820, screen.availHeight)}`);
+      if (!w && !onlyRefresh) w = window.open('', 'kelasam-draw', `popup=yes,width=${Math.min(860, screen.availWidth)},height=${Math.min(560, screen.availHeight)}`);
       if (w && w.document) { DW = w; w.document.open(); w.document.write(html); w.document.close(); if (!onlyRefresh) { try { w.focus(); } catch { } toast('نتیجه در پنجره‌ی جدا باز شد؛ می‌توانید آن را به صفحه دوم ببرید و همزمان در این پنجره کار کنید'); } return; }
     } catch { }
   }
@@ -916,7 +995,7 @@ function lastDrawCard() {
   const L = S.lastDraw; if (!L || L.cls !== db.id) return '';
   return `<div class="card" style="margin-top:16px;border:2px solid var(--brand)"><div class="top" style="margin-bottom:8px"><div><h3 style="margin:0">${ico('dice')} نتیجه آخرین قرعه‌کشی — ${fa(L.picks.length, 0)} نفر</h3><div class="sub">نتیجه در یک پنجره‌ی مستقل هم نمایش داده می‌شود؛ همان لحظه می‌توانید در همین برنامه (مثلاً صفحه «آزمون‌ها») برای دانش‌آموز نمره بگذارید.</div></div><div class="row noprint"><button class="btn sec sm" data-act="drShow">🖥 نمایش در پنجره جدا / تمام‌صفحه</button><button class="btn sm" data-act="drAgain">🎲 قرعه‌کشی دوباره</button></div></div>
   ${L.note ? `<div class="sub" style="color:var(--warn);margin-bottom:6px">${esc(L.note)}</div>` : ''}
-  <div class="drres">${L.picks.map((p, i) => { const st = stuOf(p.id); return `<div class="dwin"><span class="dn">${fa(i + 1, 0)}</span>${st ? avatar(st) : ''}<div class="dnm"><b>${st ? nl(st) : esc(p.name)}</b>${p.why && p.why.length ? `<small class="sub" style="display:block">${esc(p.why.join(' · '))}</small>` : ''}</div><button type="button" class="btn sec sm noprint" data-act="drSwap" data-id="${p.id}" title="این نفر را با یک نفر دیگر عوض کن">تعویض</button></div>`; }).join('') || '<div class="empty">کسی برای انتخاب نبود.</div>'}</div>
+  <div class="drres">${L.picks.map((p, i) => { const st = stuOf(p.id); return `<div class="dwin"><span class="dn">${fa(i + 1, 0)}</span>${st ? avatar(st) : ''}<div class="dnm"><b>${st ? nl(st) : esc(p.name)}</b></div><button type="button" class="btn sec sm noprint" data-act="drSwap" data-id="${p.id}" title="این نفر را با یک نفر دیگر عوض کن">تعویض</button></div>`; }).join('') || '<div class="empty">کسی برای انتخاب نبود.</div>'}</div>
   <div class="row noprint" style="margin-top:12px"><input id="drTitle" placeholder="عنوان لیست (اختیاری؛ مثلاً: سؤال‌پرسی فصل ۳)" value="${esc(L.title)}" style="flex:1;min-width:200px"><button class="btn" style="background:var(--ok)" data-act="drSave">📌 ${L.savedId ? 'به‌روزرسانی لیست ثبت‌شده' : 'ثبت لیست'}</button></div></div>`;
 }
 document.addEventListener('input', e => { if (e.target.id === 'drTitle' && S.lastDraw) S.lastDraw.title = e.target.value; });
@@ -958,7 +1037,10 @@ document.addEventListener('change', e => {
   const k = e.target.dataset && e.target.dataset.dr; if (!k || S.view !== 'draw') return;
   S.dr[k] = e.target.type === 'checkbox' ? e.target.checked : k === 'n' ? Math.max(1, Math.min(99, Math.floor(+e.target.value) || 1)) : e.target.value; render(true);
 });
+const attDays = () => Object.keys(db.att).filter(d => db.att[d] && Object.values(db.att[d]).some(Boolean)).sort();
 Object.assign(A, {
+  attPrev() { const p = attDays().filter(x => x < S.date).pop(); if (!p) return toast('روز ثبت‌شده‌ی قبلی وجود ندارد'); S.date = p; render(true); },
+  attNext() { const n = attDays().find(x => x > S.date); if (!n) return toast('روز ثبت‌شده‌ی بعدی وجود ندارد'); S.date = n; render(true); },
   errCopy() { const t = `kelasam ${VERSION} · ${SERVER ? 'ویندوز' : CAPP ? 'اندروید' : 'وب'} · ${navigator.userAgent}\n` + ERRLOG.map(x => new Date(x.t).toLocaleString('fa-IR') + '  ' + x.m).join('\n'); (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('گزارش کپی شد'), () => prompt('این متن را برای پشتیبانی بفرستید:', t)); },
   drStep(_, el) { S.dr.n = Math.max(1, Math.min(99, S.dr.n + (+el.dataset.d))); render(true); },
   drReset() { db.drawn = []; save(); render(true); toast('دور جدید شروع شد'); },
@@ -1034,7 +1116,7 @@ document.addEventListener('focusin', e => {
 });
 
 /* ================= about ================= */
-const VERSION = '2.3';
+const VERSION = '2.5';
 /* ---- گزارش پایداری: خطاهای برنامه و «بسته‌شدن ناگهانی» (اندروید) ثبت می‌شود تا علت قابل پیگیری باشد ---- */
 const RUN = { t: Date.now(), hb: Date.now(), state: 'fg' }, ERRLOG = [];
 const runSave = () => { try { KV.set('run', JSON.stringify(RUN)); } catch { } };
@@ -1200,6 +1282,7 @@ function download(name, text, type) { if (CAPP) { nativeOut(name, text, false).c
 $('#menuBtn').innerHTML = ico('menu') + ' منو';
 [['bInstall', 'download'], ['bExportCls', 'table'], ['bExportAll', 'layers'], ['bExport', 'save'], ['bAuto', 'clock'], ['bImport', 'folder'], ['bSync', 'sync'], ['bAbout', 'info']].forEach(([id, n]) => { const e = $('#' + id + ' .ic'); if (e) e.innerHTML = ico(n); });
 $('#bExport').onclick = () => backupFile();
+$('#bUndo').onclick = () => histGo(-1); $('#bRedo').onclick = () => histGo(1);
 $('#bAuto').onclick = () => backupsDialog();
 $('#bImport').onclick = () => $('#fImport').click();
 $('#fImport').onchange = e => { const f = e.target.files[0]; if (!f) return; f.text().then(t => { try { const d = migrate(JSON.parse(t)); if (!d) throw 0; snapNow('قبل از بازیابی فایل'); R = d; db = null; S.view = 'home'; save(); render(); toast('بازیابی انجام شد'); } catch { alert('این فایل پشتیبان معتبر نیست.'); } }); e.target.value = ''; };
@@ -1220,10 +1303,10 @@ if ($('#bInstall') && /iphone|ipad/i.test(navigator.userAgent) && !navigator.sta
       try { localStorage.removeItem(KEY); } catch { }
       addEventListener('focus', () => { flushServer().then(() => pullServer(false)); });
       document.addEventListener('visibilitychange', () => { if (!document.hidden) flushServer().then(() => pullServer(false)); });
-      addEventListener('pagehide', () => navigator.sendBeacon('api/bye'));
+      addEventListener('pagehide', e => { if (!e.persisted) navigator.sendBeacon('api/bye'); });
       $('#side .tools').insertAdjacentHTML('beforebegin', '<div id="saveSt" class="savest ok"></div>'); showSave();
       fetch('api/info', { cache: 'no-store' }).then(r => r.json()).then(i => { SINFO = i; saveInfo.t = i.mod ? i.mod * 1000 : 0; showSave(); if (i.fallback) setTimeout(() => alert('توجه: پوشه کنار برنامه (فلش) قابل نوشتن نیست و اطلاعات روی همین کامپیوتر ذخیره می‌شود:\n' + i.dir + '\n\nبرای ذخیره روی فلش، قفل نوشتن فلش را بررسی کنید یا برنامه را در پوشه‌ای که قابل نوشتن است اجرا کنید.'), 800); }).catch(() => {});
-      setInterval(() => fetch('api/ping').catch(() => {}), 10000);
+      setInterval(pingServer, 10000); document.addEventListener('visibilitychange', () => { if (!document.hidden) pingServer(); }); addEventListener('online', pingServer);
     }
   } catch { }
   if (CAPP) {
@@ -1237,6 +1320,6 @@ if ($('#bInstall') && /iphone|ipad/i.test(navigator.userAgent) && !navigator.sta
     if (fresh) { const s = await idbGet(); if (s) { try { const j = migrate(JSON.parse(s)); if (j) R = j; } catch { } } }
   } else $('#bInstall').remove();
   { let ch = false; R.classes.forEach(c => { ch = syncAbsent(c) || ch; }); if (ch) persist(); }
-  render(); syncBoot(); stabilityBoot(); androidBoot();
+  histInit(); render(); histUI(); syncBoot(); stabilityBoot(); androidBoot();
   setTimeout(autoSnap, 4000); setInterval(autoSnap, 30 * 60e3);
 })();
