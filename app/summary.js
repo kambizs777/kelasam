@@ -30,6 +30,22 @@ function summaryData(sid) {
   if (ac.pct === 100 && ac.y >= 1) strengths.push('در همه فعالیت‌ها و پروژه‌ها فعال بوده');
   return { s, b, a, avg, rank, n: c.students.length, tk, ac, ca, courses, challenges, strengths, ps };
 }
+
+/* کارت رفتار: حلقه‌ی رنگی، امتیاز، روند ماهانه و آخرین رویدادها */
+function behCard(d) {
+  const b = d.b, e = esc, ks = ['r', 'y', 'g', 'G'], tot = ks.reduce((a, k) => a + b[k], 0), R0 = 62, C = 2 * Math.PI * R0;
+  let off = 0; const arcs = tot ? ks.filter(k => b[k]).map(k => { const len = b[k] / tot * C, o = `<circle cx="80" cy="80" r="${R0}" fill="none" stroke="${BEH[k].c}" stroke-width="22" stroke-dasharray="${(len - 2).toFixed(1)} ${(C - len + 2).toFixed(1)}" stroke-dashoffset="${(-off).toFixed(1)}" transform="rotate(-90 80 80)"/>`; off += len; return o; }).join('') : '';
+  const sc = b.score, col = sc < 0 ? '#e03131' : sc > 0 ? '#2f9e44' : '#868e96', face = sc >= 3 ? '😄' : sc > 0 ? '🙂' : sc === 0 ? '😐' : sc > -3 ? '😕' : '😟';
+  const sid = d.s.id, recs = db.beh.filter(x => x.sid === sid && BEH[x.t]).sort((x, y) => x.date < y.date ? 1 : -1);
+  const M = {}; recs.forEach(x => { const m = jmon(x.date); (M[m] ??= { s: 0, n: 0 }); M[m].s += bp(x.t); M[m].n++; });
+  const ms = Object.entries(M).slice(0, 6).reverse(), mx = Math.max(1, ...ms.map(x => Math.abs(x[1].s)));
+  const bars = ms.map(([m, v]) => `<div class="mb"><div class="mbx"><i style="height:${Math.max(4, Math.abs(v.s) / mx * 100)}%;background:${v.s < 0 ? '#fa5252' : '#40c057'}"></i></div><b style="color:${v.s < 0 ? '#e03131' : '#2f9e44'}">${sgn(v.s)}</b><small>${e(m)}</small></div>`).join('');
+  const tl = recs.slice(0, 5).map(x => `<div class="tli"><i style="background:${BEH[x.t].c}"></i><span><b>${BEH[x.t].t}</b> · ${jd(x.date)}${x.note ? '<br><small>' + e(x.note) + '</small>' : ''}</span></div>`).join('');
+  return `<div class="cd"><h2>🚦 رفتار و انضباط</h2><div class="bhw"><div class="dn"><svg viewBox="0 0 160 160" width="190" height="190"><circle cx="80" cy="80" r="${R0}" fill="none" stroke="#e9ecef" stroke-width="22"/>${arcs}<text x="80" y="76" text-anchor="middle" font-size="34" font-weight="700" fill="${col}">${sgn(sc)}</text><text x="80" y="102" text-anchor="middle" font-size="13" fill="#6c757d">امتیاز رفتاری</text></svg><div class="face">${face}</div></div>
+  <div class="bhr"><div class="bts">${ks.map(k => `<div class="bt" style="background:${BEH[k].bg};color:${BEH[k].fg};${BEH[k].bd ? 'border:1px solid ' + BEH[k].bd : ''}"><div class="bn">${fa(b[k], 0)}</div><div>${BEH[k].t}</div><small>${pt(k)}</small></div>`).join('')}</div>
+  <div class="bl"><span>منفی: ${fa(b.neg, 0)}</span><span>مثبت: ${fa(b.pos, 0)}</span>${b.w ? `<span>${fa(b.w, 0)} یادداشت</span>` : ''}</div></div></div>
+  ${ms.length ? `<h3 class="sh">📈 روند ماهانه‌ی امتیاز رفتار</h3><div class="mbs">${bars}</div>` : ''}${tl ? `<h3 class="sh">🕘 آخرین رویدادها</h3><div class="tl">${tl}</div>` : ''}</div>`;
+}
 function summaryDoc(sid) {
   const d = summaryData(sid), s = d.s, m = R.meta, e = esc;
   const ring = (pct, color, label, sub) => { const r = 52, C = 2 * Math.PI * r, v = Math.max(0, Math.min(100, pct || 0)); return `<div class="ringw"><svg viewBox="0 0 140 140" width="150" height="150"><circle cx="70" cy="70" r="${r}" fill="none" stroke="#e8eef1" stroke-width="16"/><circle cx="70" cy="70" r="${r}" fill="none" stroke="${color}" stroke-width="16" stroke-linecap="round" stroke-dasharray="${(C * v / 100).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 70 70)"/><text x="70" y="78" text-anchor="middle" font-size="30" font-weight="700" fill="#16282d">${pct == null ? '—' : fa(pct, 0) + '٪'}</text></svg><b>${label}</b><small>${sub}</small></div>`; };
@@ -61,16 +77,15 @@ ul{margin:0;padding:0;list-style:none}li{padding:8px 14px 8px 8px;margin:7px 0;b
 .ch li{background:#fff5f5;border-inline-start:8px solid #fa5252}.st li{background:#ebfbee;border-inline-start:8px solid #40c057}li.none{background:#f1f3f5;border-color:#adb5bd;color:#6c757d}
 .msg{margin-top:18px;text-align:center;font-size:25px;font-weight:700;color:#0b7285;background:#fff;border-radius:24px;padding:16px}
 .bar{position:fixed;bottom:0;inset-inline:0;background:#16282dee;padding:10px;display:flex;gap:10px;justify-content:center}.bar button{border:0;border-radius:12px;padding:8px 22px;font:inherit;font-size:17px;font-weight:700;cursor:pointer;background:#ffd43b;color:#2a1d00}
+.bhw{display:flex;gap:18px;align-items:center;flex-wrap:wrap}.dn{position:relative;flex:none}.dn .face{position:absolute;inset-inline-end:-6px;top:-4px;font-size:40px}.bhr{flex:1;min-width:240px}.bhr .bts{grid-template-columns:1fr 1fr;margin-top:0}.bhr .bt .bn{font-size:34px}
+.sh{margin:14px 0 6px;font-size:18px;color:#495057}.mbs{display:flex;gap:10px;align-items:flex-end}.mb{flex:1;text-align:center}.mbx{height:80px;background:#f1f3f5;border-radius:10px;display:flex;align-items:flex-end;overflow:hidden}.mbx i{display:block;width:100%;border-radius:10px 10px 0 0}.mb b{display:block;font-size:17px}.mb small{color:#6c757d;font-size:13px}
+.tli{display:flex;gap:10px;align-items:flex-start;margin:6px 0;font-size:17px}.tli i{width:14px;height:14px;border-radius:50%;flex:none;margin-top:8px;box-shadow:0 0 0 3px #fff,0 0 0 4px #dee2e6}.tli small{color:#6c757d;font-size:15px}
 @media print{.bar{display:none}body{background:#fff}.wrap{padding:0}}
 @media(max-width:1100px){.g2,.g3{grid-template-columns:1fr}.hd{flex-wrap:wrap}.hd .kp{margin:0}.bts{grid-template-columns:1fr 1fr}.cr{grid-template-columns:110px 1fr 56px}}
 </style></head><body><div class="wrap">
-<div class="hd">${s.photo ? `<img class="av" src="${s.photo}" alt="">` : `<div class="av">${e(s.name.trim()[0] || '؟')}</div>`}<div><h1>${e(s.name)}</h1><p>کلاس ${e(db.name)}${m.school ? ' · ' + e(m.school) : ''}${m.year ? ' · سال تحصیلی ' + e(m.year) : ''}</p><p>برآیند کلی عملکرد تا ${jd(iso(new Date()))}</p></div>
+<div class="hd">${s.photo ? `<img class="av" src="${s.photo}" alt="">` : `<div class="av">${e(s.name.trim()[0] || '؟')}</div>`}<div><h1>${e(s.name)}</h1><p>کلاس ${e(db.name)}${schoolName() ? ' · ' + e(schoolName()) : ''}${m.year ? ' · سال تحصیلی ' + e(m.year) : ''}</p><p>برآیند کلی عملکرد تا ${jd(iso(new Date()))}</p></div>
 <div class="kp"><div><b>${fa(d.avg)}</b><small>میانگین از ۲۰</small></div><div><b>${d.rank ? fa(d.rank, 0) : '—'}</b><small>رتبه از ${fa(d.n, 0)}</small></div></div></div>
-<div class="g g2"><div class="cd"><h2>🚦 رفتار و انضباط</h2>
-<div class="bl"><span>منفی‌ها: ${fa(d.b.neg, 0)}</span><span>مثبت‌ها: ${fa(d.b.pos, 0)}</span></div>
-<div class="bal" dir="ltr">${totalB ? `<i class="n" style="width:${negPct}%"></i><i class="p" style="width:${100 - negPct}%"></i>` : ''}</div>
-<div class="bts">${tile('r', 'قرمز', '', '#fa5252', '#fff')}${tile('y', 'زرد', '', '#ffe066', '#5c4300')}${tile('g', 'سبز', '', '#b2f2bb', '#1b5e20')}${tile('G', 'سبز پررنگ', '', '#2f9e44', '#fff')}</div>
-<div class="score"><span class="f">${face}</span><div>امتیاز رفتاری<br><b style="color:${scCol}">${sgn(sc)}</b></div>${d.b.w ? `<div style="margin-inline-start:auto;font-size:17px;color:#6c757d">${fa(d.b.w, 0)} یادداشت</div>` : ''}</div></div>
+<div class="g g2">${behCard(d)}
 <div class="cd"><h2>📚 نمرات دروس</h2>${d.courses.map(bar).join('') || '<div style="color:#6c757d">هنوز نمره‌ای ثبت نشده</div>'}<div class="lg">نوار = نمره من · خط مشکی <u></u> = میانگین کلاس · حد قبولی ${fa(d.ps)}</div></div></div>
 <div class="g g3"><div class="cd"><h2>📅 حضور</h2><div class="rings">${ring(d.a.pct, '#2f9e44', 'درصد حضور', `${fa(d.a.a, 0)} غیبت · ${fa(d.a.l, 0)} تأخیر`)}</div></div>
 <div class="cd"><h2>📝 تکالیف</h2><div class="rings">${ring(d.tk.pct, '#7048e8', 'انجام تکالیف', `${fa(d.tk.y, 0)} انجام · ${fa(d.tk.n, 0)} نشده${d.tk.avg != null ? ' · نمره ' + fa(d.tk.avg) : ''}`)}</div></div>

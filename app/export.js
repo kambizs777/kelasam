@@ -94,7 +94,7 @@ function xlDashboard(c) {
   const sh = new XSheet(), W = 12, ps = pass(), rk = ranking(c), ca = classAvg(c);
   sh.cols = Array.from({ length: W }, () => ({ wch: 10.5 }));
   sh.put(0, 0, `گزارش کلی کلاس ${c.name}${c.grade ? ' — پایه ' + c.grade : ''}`, { sz: 22, b: 1, fc: XLC.white, bg: XLC.dark, nb: 1 }, W); sh.height(0, 46);
-  sh.put(1, 0, `${R.meta.school || 'مدرسه'}  ·  معلم: ${R.meta.teacher || '—'}  ·  سال تحصیلی ${R.meta.year || '—'}  ·  ${jd(iso(new Date()))}`, { sz: 11, fc: XLC.dark, bg: XLC.light, nb: 1 }, W); sh.height(1, 24);
+  sh.put(1, 0, `${schoolName(c) || 'مدرسه'}  ·  معلم: ${R.meta.teacher || '—'}  ·  سال تحصیلی ${R.meta.year || '—'}  ·  ${jd(iso(new Date()))}`, { sz: 11, fc: XLC.dark, bg: XLC.light, nb: 1 }, W); sh.height(1, 24);
   sh.height(2, 10);
   const attAll = mean(c.students.map(s => attCount(s.id, c).pct).filter(v => v != null));
   let pos = 0, neg = 0; c.beh.forEach(b => { const p = bp(b.t, c); if (p > 0) pos++; else if (p < 0) neg++; });
@@ -181,7 +181,7 @@ function buildWorkbook(classes, single) {
   } else {
     const heads = ['کلاس', 'پایه', 'دانش‌آموز', 'میانگین کلاس', 'میانگین حضور (٪)', 'آزمون', 'تکلیف', 'فعالیت', 'رفتار مثبت', 'رفتار منفی'];
     const rows = classes.map(c => { const at = mean(c.students.map(s => attCount(s.id, c).pct).filter(v => v != null)), ca = classAvg(c); let pos = 0, neg = 0; c.beh.forEach(b => { const p = bp(b.t, c); if (p > 0) pos++; else if (p < 0) neg++; }); return [{ v: c.name, s: { b: 1 } }, c.grade, c.students.length, { v: ca == null ? '' : +ca.toFixed(2), s: gradeSt(ca, pass()) }, { v: at == null ? '' : Math.round(at), s: pctSt(at) }, c.exams.length, c.tasks.length, c.acts.length, { v: pos, s: { fc: XLC.grnD, b: 1 } }, { v: neg, s: { fc: XLC.redD, b: 1 } }]; });
-    add('گزارش کلی', xTable('گزارش کلی همه کلاس‌ها', `${R.meta.school || ''} · معلم: ${R.meta.teacher || '—'} · سال تحصیلی ${R.meta.year || '—'} · ${jd(iso(new Date()))}`, heads, rows, { hs: heads.map((h, i) => ({ bg: i < 3 ? XLC.dark : i < 5 ? XLC.blueD : i < 8 ? XLC.pur : XLC.org })), w: [18, 10, 11, 13, 14, 9, 9, 9, 12, 12], hh: 44, rh: 26 }));
+    add('گزارش کلی', xTable('گزارش کلی همه کلاس‌ها', `${schoolsLine()} · معلم: ${R.meta.teacher || '—'} · سال تحصیلی ${R.meta.year || '—'} · ${jd(iso(new Date()))}`, heads, rows, { hs: heads.map((h, i) => ({ bg: i < 3 ? XLC.dark : i < 5 ? XLC.blueD : i < 8 ? XLC.pur : XLC.org })), w: [18, 10, 11, 13, 14, 9, 9, 9, 12, 12], hh: 44, rh: 26 }));
     classes.forEach(c => add(c.name, xlSummaryTable(c, `کلاس ${c.name}`)));
   }
   detail('ریز نمرات', 'ریز نمره‌ها', ['کلاس', 'نام', 'کد ملی', 'درس', 'آزمون', 'تاریخ', 'بارم', 'نمره', 'نمره از ۲۰'], gl, XLC.blueD);
@@ -194,6 +194,6 @@ function buildWorkbook(classes, single) {
 function exportXlsx(classes, single) {
   if (!classes.length) return toast('کلاسی برای خروجی وجود ندارد');
   const wb = buildWorkbook(classes, single);
-  const nm = single ? classes[0].name.replace(/[\\\/:*?"<>|]/g, ' ') : 'همه-کلاس‌ها';
+  const nm = single ? ('ترم-' + termFa(termOf(classes[0])) + '-' + classes[0].name).replace(/[\\\/:*?"<>|]/g, ' ') : 'همه-کلاس‌ها-ترم-' + termFa(termNow());
   xlsxOut(wb, `kelasam-${nm}-${iso(new Date())}.xlsx`);
 }

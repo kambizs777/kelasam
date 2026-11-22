@@ -37,13 +37,13 @@
   </aside>
   <div class="scrim" id="scrim"></div>
   <main>
-    <button class="btn sec menu-btn noprint" id="menuBtn" style="margin-bottom:12px">منو</button>
+    <div class="mbar noprint"><button class="btn sec menu-btn" id="menuBtn">☰ منو</button><button class="btn menu-btn" id="qfBtn">🔍 پیدا کردن دانش‌آموز</button></div>
     <div id="view"></div>
   </main>
 </div>
 <nav class="bottom noprint" id="bottom"></nav>
 <dialog id="dlg"></dialog>
-<div class="undobar noprint" id="undoBar"><button type="button" id="bUndo" disabled>↶ واگرد</button><button type="button" id="bRedo" disabled>↷ بازگرد</button></div>
+<div class="undobar noprint idle" id="undoBar"><span class="ugrip" id="uGrip" title="بکشید تا جابه‌جا شود (دوبار کلیک = جای اول)">⠿</span><button type="button" id="bUndo" aria-label="واگرد" disabled>↶</button><button type="button" id="bRedo" aria-label="بازگرد" disabled>↷</button></div>
 <div class="toast" id="toast"></div>
 <script src="chart.umd.js"></script>
 <script src="xlsx.full.min.js"></script>
@@ -51,5 +51,10 @@
 <script src="export.js"></script>
 <script src="summary.js"></script>
 <script src="app.js"></script>
+<script src="plus-core.js"></script>
+<script src="plus-exams.js"></script>
+<script src="plus-exams2.js"></script>
+<script src="plus-beh.js"></script>
+<script src="plus-profile.js"></script>
 </body>
 </html>

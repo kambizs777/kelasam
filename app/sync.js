@@ -106,6 +106,8 @@ async function syApi(action, body = {}, ms = 90000) {
     r = await fetch(syBase() + 'api.php?a=' + action, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify({ user: SY.user, token: SY.token, dev: devName(), ...body }), signal: ac.signal, cache: 'no-store' });
   } catch (e) { throw { offline: true, msg: 'اتصال به سرور برقرار نشد' }; } finally { clearTimeout(tm); }
   let j; try { j = await r.json(); } catch { throw { server: true, msg: 'پاسخ سرور درست نیست (آدرس سرور را بررسی کنید)' }; }
+  if (j && typeof j.exp === 'number') SY.exp = j.exp; // تاریخ پایان اعتبار حساب (ثانیه‌ی یونیکس؛ ۰ = نامحدود)
+  if (j && j.ok === false && (j.err === 'expired' || j.err === 'disabled')) { SYNC.st = 'expired'; SYNC.msg = j.msg || ''; if (j.exp) SY.exp = j.exp; syncPersist(true); syncStatus(); throw { expired: true, msg: j.msg }; }
   if (j && j.ok === false && j.err === 'auth') { SY.token = ''; syncPersist(true); SYNC.st = 'auth'; syncStatus(); throw { auth: true, msg: j.msg }; }
   return j;
 }
@@ -119,6 +121,7 @@ function syncLabel() {
     case 'offline': return ['warn', 'آفلاین — با اتصال اینترنت همگام می‌شود'];
     case 'err': return ['bad', 'خطای همگام‌سازی: ' + (SYNC.msg || '')];
     case 'auth': return ['bad', 'برای ادامه همگام‌سازی دوباره وارد شوید'];
+    case 'expired': return ['bad', 'اعتبار همگام‌سازی تمام شده است — اطلاعات روی همین دستگاه سالم است'];
     case 'pending': return ['warn', 'تغییرات منتظر تأیید شماست — برای مرور کلیک کنید'];
     case 'ok': return ['ok', 'همگام ✓' + t];
     default: return [SY.auto ? 'ok' : 'warn', SY.auto ? (SY.ask ? 'همگام‌سازی با تأیید شما' : 'همگام‌سازی خودکار') + (t ? ' · آخرین:' + t : '') : 'همگام‌سازی دستی'];
@@ -269,6 +272,7 @@ async function syncNow(manual, force) {
     if (!result && SYNC.st === 'syncing') { SYNC.st = 'err'; SYNC.msg = 'تداخل پیاپی؛ کمی بعد دوباره تلاش می‌شود'; }
   } catch (e) {
     if (e && e.offline) { SYNC.st = 'offline'; if (manual) toast('اینترنت یا سرور در دسترس نیست؛ اطلاعات فعلاً روی همین دستگاه ذخیره است'); }
+    else if (e && e.expired) { SYNC.st = 'expired'; if (manual) toast(e.msg || 'اعتبار همگام‌سازی تمام شده است'); }
     else if (e && e.auth) { SYNC.st = 'auth'; if (manual) toast('نشست منقضی شده؛ دوباره وارد شوید'); }
     else { SYNC.st = 'err'; SYNC.msg = (e && e.msg) || 'نامشخص'; }
   } finally {
@@ -345,6 +349,13 @@ async function syncLogout() {
 }
 
 /* ---------- dialog ---------- */
+/* اعتبار حساب: «تا ۱۴۰۶/۰۳/۳۱ (۴۵ روز دیگر)» یا هشدار پایان اعتبار */
+function expiryLine() {
+  if (!SY.exp) return '<div class="sub" style="margin-top:6px">اعتبار حساب: <b>نامحدود</b></div>';
+  const left = Math.ceil((SY.exp * 1000 - Date.now()) / 864e5), dt = jDisp(iso(new Date(SY.exp * 1000)));
+  const cls = left <= 0 ? 'bad' : left <= 14 ? 'warn' : 'ok';
+  return `<div class="row" style="margin-top:6px"><span class="pill ${cls}">اعتبار تا ${dt} ${left > 0 ? '· ' + fa(left, 0) + ' روز مانده' : '· تمام شده'}</span>${left <= 14 ? '<span class="sub">برای تمدید با پشتیبانی کلاسام تماس بگیرید.</span>' : ''}</div>`;
+}
 function syncDialog(tab) {
   const d = $('#dlg'); d.dataset.sync = '1'; d.onclose = () => { delete d.dataset.sync; };
   const close = () => { delete d.dataset.sync; d.close(); };
@@ -375,11 +386,11 @@ function syncDialog(tab) {
   const [c, t] = syncLabel();
   d.innerHTML = `<form onsubmit="return false"><h3>🔄 همگام‌سازی (رسا)</h3>
   <div class="card" style="padding:12px"><div class="row" style="justify-content:space-between"><span>حساب: <b dir="ltr">${esc(SY.user)}</b></span><span class="pill ${c === 'ok' ? 'ok' : c === 'bad' ? 'bad' : 'warn'}">${esc(t)}</span></div>
-  <div class="sub" style="margin-top:4px">این دستگاه: ${esc(devName())} · ${SY.last ? 'آخرین همگام‌سازی: ' + when(SY.last) : 'هنوز همگام نشده'}</div></div>
+  ${expiryLine()}<div class="sub" style="margin-top:4px">این دستگاه: ${esc(devName())} · ${SY.last ? 'آخرین همگام‌سازی: ' + when(SY.last) : 'هنوز همگام نشده'}</div></div>
   <label class="f">روش همگام‌سازی<select id="syMode"><option value="auto" ${SY.auto && !SY.ask ? 'selected' : ''}>خودکار و آنی (پیشنهادی؛ فقط برای حذف‌های بزرگ می‌پرسد)</option><option value="ask" ${SY.auto && SY.ask ? 'selected' : ''}>با تأیید من: قبل از هر تغییر خلاصه نشان بده</option><option value="manual" ${!SY.auto ? 'selected' : ''}>فقط دستی: خودم دکمه را بزنم</option></select></label>
   <p class="sub" style="margin:0">عکس دانش‌آموزان همگام نمی‌شود و فقط روی همان دستگاه می‌ماند. در هر حالت، اگر همگام‌سازی شامل حذف تعداد زیادی اطلاعات باشد، حتماً از شما تأیید می‌گیرد.</p>
   <div class="row"><button type="button" class="btn" id="syNow">همگام‌سازی همین الان</button><button type="button" class="btn sec" id="syHist">نسخه‌های ذخیره‌شده در سرور</button></div>
-  <div class="row"><button type="button" class="btn sec" id="syFSave">💾 ذخیره اجباری</button><button type="button" class="btn sec" id="syFSync">🔄 همگام‌سازی اجباری</button></div>
+  <div class="row"><button type="button" class="btn sec" id="syFSync">🔄 همگام‌سازی اجباری</button></div>
   <details><summary class="sub" style="cursor:pointer">گزینه‌های پیشرفته</summary><div class="row" style="margin-top:8px">
   <button type="button" class="btn sec sm" id="syDown">جایگزینی اطلاعات این دستگاه با سرور</button><button type="button" class="btn sec sm" id="syUp">جایگزینی اطلاعات سرور با این دستگاه</button><button type="button" class="btn sec sm" id="syPw">تغییر رمز</button></div></details>
   <div id="syMsg" class="sub" style="min-height:1.4em"></div>
@@ -389,7 +400,7 @@ function syncDialog(tab) {
   const msg = x => { const m = $('#syMsg'); if (m) m.textContent = x; };
   $('#syMode').onchange = e => { const v = e.target.value; SY.auto = v !== 'manual'; SY.ask = v !== 'auto'; syncPersist(true); syncStatus(); if (SY.auto) syncSoon(); };
   $('#syNow').onclick = async () => { $('#syNow').disabled = true; msg('در حال همگام‌سازی…'); const ok = await syncNow(true); if (ok) toast('همگام‌سازی کامل شد'); };
-  $('#syFSave').onclick = () => forceSave(); $('#syFSync').onclick = async () => { await syncForce(); syncDialog(); };
+  $('#syFSync').onclick = async () => { await syncForce(); syncDialog(); };
   $('#syOut').onclick = async () => { if (confirm('از حساب خارج شوید؟ اطلاعات این دستگاه سر جایش می‌ماند و برنامه آفلاین ادامه می‌دهد.')) { await syncLogout(); syncDialog(); } };
   $('#syDown').onclick = async () => {
     if (!confirm('اطلاعات این دستگاه با نسخه سرور جایگزین شود؟ (از وضعیت فعلی یک پشتیبان گرفته می‌شود)')) return;
@@ -423,6 +434,7 @@ function syncDialog(tab) {
 function syncTick() {
   if (SYNC.rr && !userBusy()) { SYNC.rr = false; render(true); }
   if (!syncOn() || !SY.auto || SYNC.busy || SYNC.st === 'auth' || SYNC.st === 'pending') return;
+  if (SYNC.st === 'expired' && Date.now() - SYNC.tried < 30 * 60e3) return; // هر نیم‌ساعت یک بار دوباره امتحان می‌کند (شاید مدیر تمدید کرده باشد)
   const want = document.hidden ? 60000 : (SYNC.st === 'err' || SYNC.st === 'offline') ? 20000 : SY_POLL;
   if (Date.now() - SYNC.tried >= want) syncNow(false);
 }
